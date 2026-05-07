@@ -1894,23 +1894,6 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let rows = [
-        format!(
-            "{}: {}",
-            i18n::tr(language, "preset"),
-            app.setup.preset_label(language)
-        ),
-        format!("{}: {}", i18n::tr(language, "name"), app.setup.name),
-        format!("{}: {}", i18n::tr(language, "latitude"), app.setup.latitude),
-        format!(
-            "{}: {}",
-            i18n::tr(language, "longitude"),
-            app.setup.longitude
-        ),
-        format!("{}: {}", i18n::tr(language, "timezone"), app.setup.timezone),
-        i18n::tr(language, "save").to_string(),
-    ];
-
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -1928,26 +1911,52 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
         Line::from(""),
     ];
 
-    for (index, row) in rows.iter().enumerate() {
-        let selected = index == app.setup.field;
-        let prefix = if selected { "> " } else { "  " };
-        let style = if selected {
-            Style::default()
-                .fg(palette.warm)
-                .bg(Color::Rgb(24, 34, 50))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.silver).bg(palette.panel)
-        };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(palette.cyan).bg(palette.panel)),
-            Span::styled(row.clone(), style),
-        ]));
-    }
-
+    lines.push(setup_action_line(
+        setup_preset_row(app, language),
+        app.setup.field == 0,
+        palette,
+    ));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        i18n::tr(language, "setup_hint"),
+        i18n::tr(language, "observer"),
+        Style::default()
+            .fg(palette.muted)
+            .bg(palette.panel)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(setup_info_line(
+        format!("{}: {}", i18n::tr(language, "name"), app.setup.name),
+        palette,
+    ));
+    lines.push(setup_info_line(
+        format!(
+            "{}: {}   {}: {}",
+            i18n::tr(language, "latitude"),
+            app.setup.latitude,
+            i18n::tr(language, "longitude"),
+            app.setup.longitude
+        ),
+        palette,
+    ));
+    lines.push(setup_info_line(
+        format!("{}: {}", i18n::tr(language, "timezone"), app.setup.timezone),
+        palette,
+    ));
+    lines.push(Line::from(""));
+    lines.push(setup_action_line(
+        i18n::tr(language, "save").to_string(),
+        app.setup.field == 1,
+        palette,
+    ));
+
+    lines.push(Line::from(""));
+    let hint_key = if app.setup.field == 0 {
+        "setup_preset_hint"
+    } else {
+        "setup_hint"
+    };
+    lines.push(Line::from(Span::styled(
+        i18n::tr(language, hint_key),
         Style::default().fg(palette.muted).bg(palette.panel),
     )));
     if !app.message.is_empty() {
@@ -1963,6 +1972,64 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+}
+
+fn setup_action_line(text: String, selected: bool, palette: Palette) -> Line<'static> {
+    let prefix = if selected { "> " } else { "  " };
+    let style = if selected {
+        Style::default()
+            .fg(palette.warm)
+            .bg(Color::Rgb(24, 34, 50))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(palette.silver).bg(palette.panel)
+    };
+    Line::from(vec![
+        Span::styled(prefix, Style::default().fg(palette.cyan).bg(palette.panel)),
+        Span::styled(text, style),
+    ])
+}
+
+fn setup_info_line(text: String, palette: Palette) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ", Style::default().bg(palette.panel)),
+        Span::styled(text, Style::default().fg(palette.muted).bg(palette.panel)),
+    ])
+}
+
+fn setup_preset_row(app: &App, language: Language) -> String {
+    let label = app.setup.preset_label(language);
+    if app.setup.preset_query.is_empty() {
+        return if app.setup.field == 0 {
+            format!(
+                "{}: {}  ({})",
+                i18n::tr(language, "preset"),
+                label,
+                i18n::tr(language, "type_to_search")
+            )
+        } else {
+            format!("{}: {}", i18n::tr(language, "preset"), label)
+        };
+    }
+
+    let query = app.setup.preset_query.as_str();
+    if app.setup_preset_match_count() == 0 {
+        format!(
+            "{}: {}  {}: {}",
+            i18n::tr(language, "preset"),
+            i18n::tr(language, "city_no_match"),
+            i18n::tr(language, "search"),
+            query
+        )
+    } else {
+        format!(
+            "{}: {}  {}: {}",
+            i18n::tr(language, "preset"),
+            label,
+            i18n::tr(language, "search"),
+            query
+        )
+    }
 }
 
 fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
@@ -2289,7 +2356,7 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("S-Tab", "上个可见星座", palette),
                 help_item("z", "放大星座", palette),
                 help_item("/", "搜索天体", palette),
-                help_item("s", "设置位置", palette),
+                help_item("s", "位置 / 搜索城市", palette),
                 help_item("o", "设置面板", palette),
                 help_item("x", "指针模式", palette),
                 help_item("?", "关闭帮助", palette),
@@ -2329,7 +2396,7 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("S-Tab", "previous constellation", palette),
                 help_item("z", "zoom constellation", palette),
                 help_item("/", "search object", palette),
-                help_item("s", "setup location", palette),
+                help_item("s", "location / city search", palette),
                 help_item("o", "settings panel", palette),
                 help_item("x", "pointer mode", palette),
                 help_item("?", "close help", palette),

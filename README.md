@@ -60,13 +60,13 @@ space   pause / resume
 { / }   jump one day
 r       return to live sky
 /       search targets
+s       setup location; type on the preset row to search city presets
 x       pointer mode; arrows move the crosshair, hover selects a star
 Tab     next visible constellation
 S-Tab   previous visible constellation
 h       toggle tonight panel
 o       settings panel
 v       city tour
-s       setup location
 ?       detailed help
 ```
 
@@ -89,6 +89,10 @@ Search accepts proper names, curated aliases, HIP/HD-style identifiers, western
 constellation names, Chinese constellation names, planets, and Messier objects.
 For example, `Tau Ceti`, `τ Ceti`, `天仓五`, `HD 10700`, and `HIP 8102` all
 select the same star.
+
+The location setup preset row accepts typing to search preset city names,
+Chinese names, and timezones. The matched city fills the location fields, then
+the usual save row applies it.
 
 ## Data And License
 

@@ -66,6 +66,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "search_empty") => {
             "Type a star, alias, HIP/HD, constellation, planet, or Messier object"
         }
+        (Language::En, "type_to_search") => "type to search",
+        (Language::En, "city_no_match") => "No city match",
         (Language::En, "no_visible_constellations") => "No visible constellations",
         (Language::En, "selection_cleared") => "Selection cleared",
         (Language::En, "tour_on") => "City tour on",
@@ -82,17 +84,18 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "invalid_coord") => "Use valid latitude and longitude numbers",
         (Language::En, "help") => "Help",
         (Language::En, "help_hint") => "? help",
-        (Language::En, "setup_hint") => {
-            "Tab/Up/Down move · Left/Right preset · Enter next/save · Esc back"
+        (Language::En, "setup_hint") => "Up/Down choose preset or save · Enter save · Esc back",
+        (Language::En, "setup_preset_hint") => {
+            "Type to search city · Backspace edit · Left/Right switch result · Enter confirm"
         }
         (Language::En, "footer") => {
-            "q quit · ←/→ city · space pause · x pointer · z zoom · +/- mag · [/] hour · / search · Tab const · c lines · h tonight · o settings · ? help"
+            "q quit/zoom out · s location · ←/→ city · space pause · x pointer · z zoom · +/- mag · [/] hour · / search · Tab const · c lines · h tonight · o settings · ? help"
         }
         (Language::En, "footer_compact") => {
-            "q · ←/→ city · space · x pointer · z zoom · +/- mag · / search · Tab · c lines · o · ?"
+            "q/zoom · s location · ←/→ city · space · x pointer · z zoom · +/- mag · / search · Tab · c lines · o · ?"
         }
         (Language::En, "help_body") => {
-            "Navigation\nq      quit\nEsc    clear selected target; quit if nothing is selected\n←/→    switch city preset\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      setup location\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, limiting magnitude."
+            "Navigation\nq      quit; exit zoom first while zoomed\nEsc    clear selected target; quit if nothing is selected\n←/→    switch city preset\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      location setup; type on preset to search city\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, limiting magnitude."
         }
         (Language::En, "new_moon") => "New Moon",
         (Language::En, "waxing_crescent") => "Waxing Crescent",
@@ -164,6 +167,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "legend_planets") => "行星",
         (Language::Zh, "search") => "搜索",
         (Language::Zh, "search_empty") => "输入星名、别名、HIP/HD、星座、行星或梅西耶天体",
+        (Language::Zh, "type_to_search") => "输入以搜索",
+        (Language::Zh, "city_no_match") => "无匹配城市",
         (Language::Zh, "no_visible_constellations") => "当前没有可见星座",
         (Language::Zh, "selection_cleared") => "已取消选中",
         (Language::Zh, "tour_on") => "城市巡游开启",
@@ -180,15 +185,18 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "invalid_coord") => "请输入有效的纬度和经度",
         (Language::Zh, "help") => "帮助",
         (Language::Zh, "help_hint") => "? 帮助",
-        (Language::Zh, "setup_hint") => "Tab/上下 切换 · 左右 预设 · Enter 下一项/保存 · Esc 返回",
+        (Language::Zh, "setup_hint") => "上下切换预设/保存 · Enter 保存 · Esc 返回",
+        (Language::Zh, "setup_preset_hint") => {
+            "输入搜索城市 · Backspace 修改 · 左右切换结果 · Enter 确认"
+        }
         (Language::Zh, "footer") => {
-            "q 退出 · ←/→ 城市 · space 暂停 · x 指针 · z 放大 · +/- 星等 · [/] 小时 · / 搜索 · Tab 星座 · c 连线 · h 今晚 · o 设置 · ? 帮助"
+            "q 退出/退放大 · s 位置 · ←/→ 城市 · space 暂停 · x 指针 · z 放大 · +/- 星等 · [/] 小时 · / 搜索 · Tab 星座 · c 连线 · h 今晚 · o 设置 · ? 帮助"
         }
         (Language::Zh, "footer_compact") => {
-            "q · ←/→ 城市 · space · x 指针 · z 放大 · +/- 星等 · / 搜索 · Tab · c 连线 · o · ?"
+            "q/退放大 · s 位置 · ←/→ 城市 · space · x 指针 · z 放大 · +/- 星等 · / 搜索 · Tab · c 连线 · o · ?"
         }
         (Language::Zh, "help_body") => {
-            "导航\nq      退出\nEsc    取消选中目标；无选中目标时退出\n←/→    切换城市预设\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      设置位置\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、极限星等。"
+            "导航\nq      退出；放大时先退出放大\nEsc    取消选中目标；无选中目标时退出\n←/→    切换城市预设\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      位置设置；在预设行输入可搜索城市\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、极限星等。"
         }
         (Language::Zh, "new_moon") => "新月",
         (Language::Zh, "waxing_crescent") => "蛾眉月",

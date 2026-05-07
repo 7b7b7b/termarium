@@ -20,6 +20,8 @@ use crate::{
 const POINTER_FAST_STEP: isize = 2;
 const POINTER_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
 const SKY_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(720);
+const SETUP_PRESET_FIELD: usize = 0;
+const SETUP_SAVE_FIELD: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -445,6 +447,7 @@ pub const PRESETS: &[Preset] = &[
 #[derive(Debug, Clone)]
 pub struct SetupState {
     pub preset_index: usize,
+    pub preset_query: String,
     pub field: usize,
     pub name: String,
     pub latitude: String,
@@ -469,6 +472,7 @@ impl SetupState {
             .unwrap_or(PRESETS.len() - 1);
         Self {
             preset_index,
+            preset_query: String::new(),
             field: 0,
             name: location.name.clone(),
             latitude: format!("{:.4}", location.latitude),
@@ -772,7 +776,13 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('q') => self.should_quit = true,
+            KeyCode::Char('q') => {
+                if self.constellation_zoom {
+                    self.toggle_constellation_zoom();
+                } else {
+                    self.should_quit = true;
+                }
+            }
             KeyCode::Esc => {
                 if self.constellation_zoom {
                     self.toggle_constellation_zoom();
@@ -956,61 +966,98 @@ impl App {
                     self.should_quit = true;
                 }
             }
-            KeyCode::Char('q') if self.can_cancel_setup => self.screen = Screen::Sky,
-            KeyCode::Char('q') => self.should_quit = true,
-            KeyCode::Tab | KeyCode::Down => self.setup.field = (self.setup.field + 1).min(5),
+            KeyCode::Tab | KeyCode::Down => self.move_setup_field(SETUP_SAVE_FIELD),
             KeyCode::BackTab | KeyCode::Up => {
-                self.setup.field = self.setup.field.saturating_sub(1);
+                self.move_setup_field(SETUP_PRESET_FIELD);
             }
             KeyCode::Left => {
-                if self.setup.field == 0 {
+                if self.setup.field == SETUP_PRESET_FIELD {
                     self.cycle_preset(false);
                 }
             }
             KeyCode::Right => {
-                if self.setup.field == 0 {
+                if self.setup.field == SETUP_PRESET_FIELD {
                     self.cycle_preset(true);
                 }
             }
             KeyCode::Enter => {
-                if self.setup.field == 5 {
+                if self.setup.field == SETUP_SAVE_FIELD {
                     self.commit_setup()?;
                 } else {
-                    self.setup.field = (self.setup.field + 1).min(5);
+                    self.move_setup_field(SETUP_SAVE_FIELD);
                 }
             }
-            KeyCode::Backspace if matches!(self.setup.field, 1..=4) => {
-                self.active_setup_input().pop();
-            }
-            KeyCode::Char(c) => {
-                if matches!(self.setup.field, 1..=4) {
-                    self.active_setup_input().push(c);
+            KeyCode::Backspace if self.setup.field == SETUP_PRESET_FIELD => {
+                if self.setup.preset_query.pop().is_some() && !self.setup.preset_query.is_empty() {
+                    self.refresh_setup_preset(false);
                 }
+            }
+            KeyCode::Char(c) if self.setup.field == SETUP_PRESET_FIELD => {
+                self.setup.preset_query.push(c);
+                self.refresh_setup_preset(true);
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn active_setup_input(&mut self) -> &mut String {
-        match self.setup.field {
-            2 => &mut self.setup.latitude,
-            3 => &mut self.setup.longitude,
-            4 => &mut self.setup.timezone,
-            _ => &mut self.setup.name,
+    fn move_setup_field(&mut self, field: usize) {
+        let field = field.min(SETUP_SAVE_FIELD);
+        if self.setup.field == SETUP_PRESET_FIELD && field != SETUP_PRESET_FIELD {
+            self.confirm_setup_preset_search();
         }
+        self.setup.field = field;
     }
 
     fn cycle_preset(&mut self, forward: bool) {
-        let len = PRESETS.len();
-        self.setup.preset_index = if forward {
-            (self.setup.preset_index + 1) % len
-        } else if self.setup.preset_index == 0 {
-            len - 1
-        } else {
-            self.setup.preset_index - 1
-        };
+        let matches = self.setup_preset_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let current = matches
+            .iter()
+            .position(|index| *index == self.setup.preset_index);
+        self.setup.preset_index = matches[next_position(current, matches.len(), forward)];
+        self.apply_setup_preset();
+    }
 
+    fn refresh_setup_preset(&mut self, prefer_first: bool) {
+        let matches = self.setup_preset_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let current_in_matches = matches
+            .iter()
+            .any(|index| *index == self.setup.preset_index);
+        if prefer_first || !current_in_matches {
+            self.setup.preset_index = matches[0];
+        }
+        self.apply_setup_preset();
+    }
+
+    fn confirm_setup_preset_search(&mut self) {
+        if self.setup.preset_query.is_empty() {
+            return;
+        }
+        self.refresh_setup_preset(false);
+        self.setup.preset_query.clear();
+    }
+
+    fn setup_preset_matches(&self) -> Vec<usize> {
+        let query = self.setup.preset_query.trim();
+        if query.is_empty() {
+            return (0..PRESETS.len()).collect();
+        }
+        PRESETS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, preset)| {
+                (!preset.custom && city_matches_query(preset, query)).then_some(index)
+            })
+            .collect()
+    }
+
+    fn apply_setup_preset(&mut self) {
         let preset = PRESETS[self.setup.preset_index];
         if !preset.custom {
             self.setup.name = preset.en.to_string();
@@ -1021,6 +1068,8 @@ impl App {
     }
 
     fn commit_setup(&mut self) -> io::Result<()> {
+        self.confirm_setup_preset_search();
+        let from_location = self.config.location.clone();
         let latitude = match self.setup.latitude.trim().parse::<f64>() {
             Ok(value) => value,
             Err(_) => {
@@ -1041,25 +1090,25 @@ impl App {
         } else {
             self.setup.name.trim().to_string()
         };
-        self.config.location = Location {
+        let to_location = Location {
             name,
             latitude,
             longitude,
             timezone,
         };
+        self.config.location = to_location.clone();
 
         if let Err(err) = self.config.validate() {
+            self.config.location = from_location;
             self.message = err;
             return Ok(());
         }
 
         self.save()?;
+        self.start_city_transition(from_location, to_location);
         self.can_cancel_setup = true;
         self.screen = Screen::Sky;
         self.message = i18n::tr(self.config.language, "saved").to_string();
-        if self.config.display.animations {
-            self.opening_ticks = 90;
-        }
         Ok(())
     }
 
@@ -1361,6 +1410,10 @@ impl App {
         planets::visible_planets(self.now())
             .into_iter()
             .find(|planet| planet.name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn setup_preset_match_count(&self) -> usize {
+        self.setup_preset_matches().len()
     }
 
     pub fn visible_constellation_codes(&self) -> Vec<String> {
@@ -2115,6 +2168,20 @@ fn city_indices() -> Vec<usize> {
         .collect()
 }
 
+fn city_matches_query(preset: &Preset, query: &str) -> bool {
+    let needle = query.to_lowercase();
+    let compact_needle = needle.split_whitespace().collect::<String>();
+    [preset.en, preset.zh, preset.timezone].iter().any(|value| {
+        let haystack = value.to_lowercase();
+        haystack.contains(&needle)
+            || (!compact_needle.is_empty()
+                && haystack
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(&compact_needle))
+    })
+}
+
 fn current_preset_index(location: &Location) -> Option<usize> {
     PRESETS.iter().position(|preset| {
         !preset.custom
@@ -2233,6 +2300,71 @@ mod tests {
         app.cycle_city(false).unwrap();
         let last_city = PRESETS.iter().rev().find(|preset| !preset.custom).unwrap();
         assert_eq!(app.config.location.name, last_city.en);
+    }
+
+    #[test]
+    fn setup_preset_field_searches_and_saves_city() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('s'))).unwrap();
+        assert_eq!(app.screen, Screen::Setup);
+        app.handle_key(KeyEvent::from(KeyCode::Down)).unwrap();
+        assert_eq!(app.setup.field, 1);
+        app.handle_key(KeyEvent::from(KeyCode::Up)).unwrap();
+        assert_eq!(app.setup.field, 0);
+        app.handle_key(KeyEvent::from(KeyCode::Char('l'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('o'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('n'))).unwrap();
+        assert_eq!(app.setup.preset_label(Language::En), "London");
+        assert_eq!(app.setup.name, "London");
+        assert_eq!(app.setup.timezone, "Europe/London");
+        assert_eq!(app.setup.preset_query, "lon");
+        app.handle_key(KeyEvent::from(KeyCode::Backspace)).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Backspace)).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Backspace)).unwrap();
+        assert!(app.setup.preset_query.is_empty());
+        assert_eq!(app.setup.preset_label(Language::En), "London");
+        app.handle_key(KeyEvent::from(KeyCode::Char('l'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('o'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('n'))).unwrap();
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.setup.field, 1);
+        assert!(app.setup.preset_query.is_empty());
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.screen, Screen::Sky);
+        assert_eq!(app.config.location.name, "London");
+        assert_eq!(app.config.location.timezone, "Europe/London");
+        assert_eq!(app.opening_ticks, 0);
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::City { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn setup_preset_search_matches_chinese_city_names() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+
+        app.screen = Screen::Setup;
+        app.handle_key(KeyEvent::from(KeyCode::Char('东'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('京'))).unwrap();
+        assert_eq!(app.setup.preset_label(Language::En), "Tokyo");
+        assert_eq!(app.setup.name, "Tokyo");
     }
 
     #[test]
@@ -2420,6 +2552,28 @@ mod tests {
             })
         ));
         assert!(app.should_render_zoomed_sky());
+    }
+
+    #[test]
+    fn q_exits_constellation_zoom_before_quitting() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-q-zoom-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        assert!(app.constellation_zoom);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('q'))).unwrap();
+        assert!(!app.constellation_zoom);
+        assert!(!app.should_quit);
+
+        app.sky_transition = None;
+        app.handle_key(KeyEvent::from(KeyCode::Char('q'))).unwrap();
+        assert!(app.should_quit);
     }
 
     #[test]
