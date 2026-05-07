@@ -17,6 +17,9 @@ npm install -g termarium
 termarium
 ```
 
+The npm installer currently ships prebuilt binaries for macOS arm64,
+Linux x64, and Windows x64.
+
 ## Features
 
 - Full-screen terminal UI built with Rust, Ratatui, and Crossterm

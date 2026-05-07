@@ -18,11 +18,6 @@ const targets = {
     archive: "tar.gz",
     binary: "termarium",
   },
-  "darwin-x64": {
-    target: "x86_64-apple-darwin",
-    archive: "tar.gz",
-    binary: "termarium",
-  },
   "linux-x64": {
     target: "x86_64-unknown-linux-gnu",
     archive: "tar.gz",
