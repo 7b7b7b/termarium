@@ -1,4 +1,4 @@
-# Termarium
+# Termarium 穹顶终端
 
 Termarium is a quiet terminal planetarium. It opens as a full-screen TUI,
 asks for your observing location the first time, then renders a real bright-star

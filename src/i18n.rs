@@ -95,7 +95,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "last_quarter") => "Last Quarter",
         (Language::En, "waning_crescent") => "Waning Crescent",
         (Language::Zh, "title") => "TERMARIUM",
-        (Language::Zh, "subtitle") => "静谧终端天文馆",
+        (Language::Zh, "subtitle") => "穹顶终端",
         (Language::Zh, "sky") => "星空",
         (Language::Zh, "observer") => "观测点",
         (Language::Zh, "visible") => "可见",
