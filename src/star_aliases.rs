@@ -1,4 +1,4 @@
-use crate::catalog::Star;
+use crate::{catalog::Star, config::Language};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StarAlias {
@@ -302,16 +302,39 @@ pub fn display_name(star: Star) -> String {
     }
 }
 
-pub fn summary_aliases(star: Star) -> Option<String> {
+pub fn display_name_for(star: Star, language: Language) -> String {
+    let english = display_name(star);
+    if language == Language::Zh {
+        if let Some(chinese) = chinese_name(star) {
+            if chinese != english {
+                return format!("{chinese} / {english}");
+            }
+        }
+    }
+    english
+}
+
+pub fn summary_aliases_for(star: Star, language: Language) -> Option<String> {
     let entry = for_hip(star.hip)?;
+    let chinese = chinese_name(star);
     let aliases = entry
         .aliases
         .iter()
         .copied()
         .filter(|alias| !alias.eq_ignore_ascii_case(entry.display))
+        .filter(|alias| chinese != Some(*alias))
+        .filter(|alias| language == Language::Zh || !contains_cjk(alias))
         .take(4)
         .collect::<Vec<_>>();
     (!aliases.is_empty()).then(|| aliases.join(", "))
+}
+
+pub fn chinese_name(star: Star) -> Option<&'static str> {
+    for_hip(star.hip)?
+        .aliases
+        .iter()
+        .copied()
+        .find(|alias| contains_cjk(alias))
 }
 
 pub fn matches_query(star: Star, query: &str) -> bool {
@@ -371,6 +394,17 @@ fn compact(value: &str) -> String {
         .collect()
 }
 
+fn contains_cjk(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(
+            character,
+            '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +423,13 @@ mod tests {
             assert!(matches_query(tau, query), "{query} should match Tau Ceti");
         }
         assert_eq!(display_name(tau), "Tau Ceti");
+        assert_eq!(display_name_for(tau, Language::Zh), "天仓五 / Tau Ceti");
+        assert_eq!(display_name_for(tau, Language::En), "Tau Ceti");
+        assert!(
+            !summary_aliases_for(tau, Language::En)
+                .unwrap()
+                .contains("天仓五")
+        );
     }
 
     #[test]

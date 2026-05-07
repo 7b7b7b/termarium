@@ -437,8 +437,6 @@ fn star_symbol(magnitude: f64, unicode: bool, tick: u64) -> char {
         }
     } else if magnitude <= 1.4 {
         '*'
-    } else if magnitude <= 2.7 {
-        '+'
     } else {
         '.'
     }
@@ -1094,7 +1092,7 @@ fn push_star_summary(lines: &mut Vec<Line<'static>>, app: &App, star: crate::cat
         app.now(),
     );
     let meta = constellations::meta_for(star.constellation);
-    lines.push(Line::from(star_aliases::display_name(star)));
+    lines.push(Line::from(star_aliases::display_name_for(star, language)));
     lines.push(Line::from(format!(
         "HIP {} · mag {:.1} · {}",
         star.hip, star.magnitude, meta.en
@@ -1108,7 +1106,7 @@ fn push_star_summary(lines: &mut Vec<Line<'static>>, app: &App, star: crate::cat
         format_ra(star.ra_hours),
         star.dec_degrees
     )));
-    if let Some(aliases) = star_aliases::summary_aliases(star) {
+    if let Some(aliases) = star_aliases::summary_aliases_for(star, language) {
         lines.push(Line::from(format!("aka {aliases}")));
     }
     lines.push(Line::from(format!(
@@ -1132,7 +1130,7 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 push_position(
                     &mut lines,
                     app,
-                    &star_aliases::display_name(star),
+                    &star_aliases::display_name_for(star, language),
                     star.ra_hours,
                     star.dec_degrees,
                 );
@@ -1140,7 +1138,7 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                     "HIP {} · mag {:.1}",
                     star.hip, star.magnitude
                 )));
-                if let Some(aliases) = star_aliases::summary_aliases(star) {
+                if let Some(aliases) = star_aliases::summary_aliases_for(star, language) {
                     lines.push(Line::from(format!("aka {aliases}")));
                 }
                 let meta = constellations::meta_for(star.constellation);
@@ -1259,7 +1257,7 @@ fn recommendation_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
     ))];
 
     if let Some(star) = brightest_visible_star(app) {
-        let label = star_aliases::display_name(star);
+        let label = star_aliases::display_name_for(star, language);
         lines.push(Line::from(format!(
             "{}: {} ({:.1})",
             i18n::tr(language, "bright_star"),
@@ -2158,6 +2156,9 @@ mod tests {
 
     #[test]
     fn line_chars_are_single_width_ascii() {
+        assert_eq!(star_symbol(-1.0, false, 0), '*');
+        assert_eq!(star_symbol(2.0, false, 0), '.');
+        assert_eq!(star_symbol(4.0, false, 0), '.');
         for ch in [
             star_symbol(-1.0, false, 0),
             star_symbol(1.0, false, 0),
@@ -2169,6 +2170,15 @@ mod tests {
         ] {
             assert!(ch.is_ascii());
         }
+    }
+
+    #[test]
+    fn zh_target_lines_show_chinese_and_english_star_name() {
+        let mut app = app_for_test(false);
+        app.config.language = Language::Zh;
+        app.selected_target = Some(Target::Star(8102));
+        let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
+        assert!(text.contains("天仓五 / Tau Ceti"));
     }
 
     #[test]

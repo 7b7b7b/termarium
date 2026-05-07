@@ -1040,8 +1040,9 @@ impl App {
 
         for star in &self.catalog.stars {
             if star_aliases::matches_query(*star, query) {
-                let label = star_aliases::display_name(*star);
-                let detail_name = if label == format!("HIP {}", star.hip) {
+                let label = star_aliases::display_name_for(*star, self.config.language);
+                let canonical = star_aliases::display_name(*star);
+                let detail_name = if canonical == format!("HIP {}", star.hip) {
                     "star".to_string()
                 } else {
                     format!("star · {label}")
@@ -1255,7 +1256,7 @@ impl App {
         if let Some(visible) = nearest {
             self.pointer.hovered = Some(visible.star.hip);
             self.selected_target = Some(Target::Star(visible.star.hip));
-            self.message = star_aliases::display_name(visible.star);
+            self.message = star_aliases::display_name_for(visible.star, self.config.language);
         } else {
             self.pointer.hovered = None;
             self.selected_target = None;
@@ -1507,6 +1508,17 @@ mod tests {
                 "{query} should find Tau Ceti"
             );
         }
+
+        app.config.language = Language::Zh;
+        app.search.query = "天仓五".to_string();
+        app.refresh_search();
+        assert!(
+            app.search
+                .results
+                .iter()
+                .any(|result| result.label == "天仓五 / Tau Ceti"),
+            "Chinese UI should show Chinese and English star names"
+        );
     }
 
     #[test]
