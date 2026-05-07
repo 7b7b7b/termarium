@@ -20,6 +20,8 @@ use crate::{
 const POINTER_FAST_STEP: isize = 2;
 const POINTER_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
 const SKY_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(720);
+const TIME_SHIFT_HOLD_WINDOW: StdDuration = StdDuration::from_millis(180);
+const TIME_REPEAT_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(160);
 const SETUP_PRESET_FIELD: usize = 0;
 const SETUP_SAVE_FIELD: usize = 1;
 
@@ -623,6 +625,7 @@ pub struct App {
     pub animation_tick: u64,
     pub opening_ticks: u8,
     last_pointer_move: Option<(KeyCode, Instant)>,
+    last_time_shift: Option<(KeyCode, Instant)>,
     sky_transition: Option<SkyTransition>,
 }
 
@@ -668,6 +671,7 @@ impl App {
             animation_tick: 0,
             opening_ticks: 0,
             last_pointer_move: None,
+            last_time_shift: None,
             sky_transition: None,
         }
     }
@@ -814,10 +818,10 @@ impl App {
             KeyCode::Left => self.cycle_city(false)?,
             KeyCode::Right => self.cycle_city(true)?,
             KeyCode::Char(' ') => self.toggle_pause(),
-            KeyCode::Char('[') => self.shift_time(Duration::hours(-1)),
-            KeyCode::Char(']') => self.shift_time(Duration::hours(1)),
-            KeyCode::Char('{') => self.shift_time(Duration::days(-1)),
-            KeyCode::Char('}') => self.shift_time(Duration::days(1)),
+            KeyCode::Char('[') => self.shift_hour_time(key, Duration::hours(-1)),
+            KeyCode::Char(']') => self.shift_hour_time(key, Duration::hours(1)),
+            KeyCode::Char('{') => self.shift_day_time(key, Duration::days(-1)),
+            KeyCode::Char('}') => self.shift_day_time(key, Duration::days(1)),
             KeyCode::Char('r') => self.reset_time(),
             KeyCode::Char('t') => {
                 self.config.language = self.config.language.toggle();
@@ -1168,17 +1172,49 @@ impl App {
             self.time_base = self.now();
             self.clock_base = Instant::now();
             self.paused = true;
+            self.last_time_shift = None;
             self.clear_time_transition();
             self.message = i18n::tr(self.config.language, "paused").to_string();
         }
     }
 
-    fn shift_time(&mut self, delta: Duration) {
-        let from_time = self.now();
-        let to_time = from_time + delta;
+    fn shift_time_immediate(&mut self, delta: Duration) {
+        let to_time = self.committed_time() + delta;
         self.time_base = to_time;
         self.clock_base = Instant::now();
-        self.start_time_transition(from_time, to_time);
+        self.clear_time_transition();
+        self.message = i18n::tr(self.config.language, "time_shifted").to_string();
+    }
+
+    fn shift_hour_time(&mut self, key: KeyEvent, delta: Duration) {
+        let is_repeat = self.is_repeated_time_shift(key);
+        if is_repeat || !self.config.display.animations {
+            self.shift_time_immediate(delta);
+        } else {
+            self.shift_time_animated(delta, SKY_TRANSITION_DURATION);
+        }
+    }
+
+    fn shift_day_time(&mut self, key: KeyEvent, delta: Duration) {
+        let is_repeat = self.is_repeated_time_shift(key);
+        if !self.config.display.animations {
+            self.shift_time_immediate(delta);
+            return;
+        }
+        let duration = if is_repeat {
+            TIME_REPEAT_TRANSITION_DURATION
+        } else {
+            SKY_TRANSITION_DURATION
+        };
+        self.shift_time_animated(delta, duration);
+    }
+
+    fn shift_time_animated(&mut self, delta: Duration, duration: StdDuration) {
+        let from_time = self.now();
+        let to_time = self.committed_time() + delta;
+        self.time_base = to_time;
+        self.clock_base = Instant::now();
+        self.start_time_transition(from_time, to_time, duration);
         self.message = i18n::tr(self.config.language, "time_shifted").to_string();
     }
 
@@ -1186,6 +1222,7 @@ impl App {
         self.time_base = Utc::now();
         self.clock_base = Instant::now();
         self.paused = false;
+        self.last_time_shift = None;
         self.clear_time_transition();
         self.message = i18n::tr(self.config.language, "live").to_string();
     }
@@ -1514,6 +1551,28 @@ impl App {
         if is_fast_repeat { POINTER_FAST_STEP } else { 1 }
     }
 
+    fn is_repeated_time_shift(&mut self, key: KeyEvent) -> bool {
+        let now = Instant::now();
+        let is_repeat = matches!(key.kind, KeyEventKind::Repeat)
+            || self.last_time_shift.is_some_and(|(code, at)| {
+                code == key.code && now.duration_since(at) <= TIME_SHIFT_HOLD_WINDOW
+            });
+        self.last_time_shift = Some((key.code, now));
+        is_repeat
+    }
+
+    fn committed_time(&self) -> DateTime<Utc> {
+        if let Some(SkyTransition {
+            kind: SkyTransitionKind::Time { to, .. },
+            ..
+        }) = &self.sky_transition
+        {
+            *to
+        } else {
+            self.now()
+        }
+    }
+
     fn start_city_transition(&mut self, from: Location, to: Location) {
         if !self.config.display.animations || same_location(&from, &to) {
             return;
@@ -1570,14 +1629,19 @@ impl App {
         });
     }
 
-    fn start_time_transition(&mut self, from: DateTime<Utc>, to: DateTime<Utc>) {
+    fn start_time_transition(
+        &mut self,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        duration: StdDuration,
+    ) {
         if !self.config.display.animations || from == to {
             return;
         }
         self.sky_transition = Some(SkyTransition {
             kind: SkyTransitionKind::Time { from, to },
             started: Instant::now(),
-            duration: SKY_TRANSITION_DURATION,
+            duration,
         });
     }
 
@@ -2439,22 +2503,152 @@ mod tests {
         });
         app.time_base = base;
         app.paused = true;
-        app.shift_time(Duration::hours(1));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(']'))).unwrap();
+
         assert_eq!(app.time_base, base + Duration::hours(1));
         assert!(matches!(
             app.sky_transition.as_ref(),
             Some(SkyTransition {
                 kind: SkyTransitionKind::Time { from, to },
+                duration,
                 ..
-            }) if *from == base && *to == base + Duration::hours(1)
+            }) if *from == base && *to == base + Duration::hours(1) && *duration == SKY_TRANSITION_DURATION
         ));
-        assert!(app.now() >= base);
-        assert!(app.now() <= base + Duration::hours(1));
         app.sky_transition = None;
         assert_eq!(app.now(), base + Duration::hours(1));
         app.toggle_pause();
         assert!(!app.paused);
         assert!((Utc::now() - app.now()).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn repeated_hour_shift_is_immediate_and_uses_committed_target() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(']'))).unwrap();
+        app.handle_key(KeyEvent::new_with_kind(
+            KeyCode::Char(']'),
+            crossterm::event::KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ))
+        .unwrap();
+
+        assert_eq!(app.time_base, base + Duration::hours(2));
+        assert!(app.sky_transition.is_none());
+        assert_eq!(app.now(), base + Duration::hours(2));
+    }
+
+    #[test]
+    fn day_shift_uses_full_animation_for_single_press() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('}'))).unwrap();
+
+        assert_eq!(app.time_base, base + Duration::days(1));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Time { from, to },
+                duration,
+                ..
+            }) if *from == base && *to == base + Duration::days(1) && *duration == SKY_TRANSITION_DURATION
+        ));
+    }
+
+    #[test]
+    fn repeated_day_shift_uses_fast_animation_and_committed_target() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('}'))).unwrap();
+        app.handle_key(KeyEvent::new_with_kind(
+            KeyCode::Char('}'),
+            crossterm::event::KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ))
+        .unwrap();
+
+        assert_eq!(app.time_base, base + Duration::days(2));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Time { to, .. },
+                duration,
+                ..
+            }) if *to == base + Duration::days(2) && *duration == TIME_REPEAT_TRANSITION_DURATION
+        ));
+    }
+
+    #[test]
+    fn close_day_shift_press_is_treated_as_fast_repeat() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('{'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('{'))).unwrap();
+
+        assert_eq!(app.time_base, base - Duration::days(2));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Time { to, .. },
+                duration,
+                ..
+            }) if *to == base - Duration::days(2) && *duration == TIME_REPEAT_TRANSITION_DURATION
+        ));
+    }
+
+    #[test]
+    fn time_shift_does_not_animate_when_animations_are_off() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+        app.config.display.animations = false;
+
+        app.handle_key(KeyEvent::from(KeyCode::Char(']'))).unwrap();
+        assert_eq!(app.time_base, base + Duration::hours(1));
+        assert!(app.sky_transition.is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('}'))).unwrap();
+        assert_eq!(app.time_base, base + Duration::hours(1) + Duration::days(1));
+        assert!(app.sky_transition.is_none());
     }
 
     #[test]
