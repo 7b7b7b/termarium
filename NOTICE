@@ -1,0 +1,51 @@
+Termarium includes a filtered bright-star subset derived from the HYG Database
+v4.2 by David Nash / Astronomy Nexus.
+
+Source:
+https://codeberg.org/astronexus/hyg
+https://www.astronexus.com/projects/hyg
+
+The HYG Database is licensed under Creative Commons Attribution-ShareAlike 4.0
+International (CC BY-SA 4.0). The filtered file in this repository keeps only
+the fields needed by Termarium:
+
+hip, proper, ra, dec, mag, ci, con
+
+Termarium also includes a small manually curated star-alias index that maps
+common names, Bayer-style labels, HIP/HD-style identifiers, and selected Chinese
+names back to bundled HIP stars for offline search. This alias layer is not an
+authoritative nomenclature catalog; it is a convenience index for the TUI.
+
+Termarium code is licensed under MIT. The bundled star data remains licensed
+under CC BY-SA 4.0.
+
+Termarium also includes a converted constellation-line catalog derived from
+ConstellationLines by Marc van der Sluys / hemel.waarnemen.com.
+
+Source:
+https://github.com/MarcvdSluys/ConstellationLines
+https://zenodo.org/doi/10.5281/zenodo.10397192
+
+The ConstellationLines data is licensed under Creative Commons Attribution 4.0
+International (CC BY 4.0). Termarium converts the source BSC/HR star-number
+paths to HIP-number paths and filters them to the bundled bright-star subset.
+
+Termarium includes a small converted deep-sky catalog derived from OpenNGC
+v20260501 by Mattia Verga and contributors.
+
+Source:
+https://github.com/mattiaverga/OpenNGC
+https://github.com/mattiaverga/OpenNGC/tree/v20260501
+
+OpenNGC is licensed under Creative Commons Attribution-ShareAlike 4.0
+International (CC BY-SA 4.0). Termarium keeps Messier objects, converts RA/Dec
+to decimal hours/degrees, and adds manually curated entries for M40, M45, and
+M102 where the OpenNGC Messier field is intentionally absent or ambiguous.
+
+Termarium's offline planet positions use low-precision orbital elements and
+methods from NASA/JPL Approximate Positions of the Planets:
+https://ssd.jpl.nasa.gov/planets/approx_pos.html
+
+Termarium's offline solar position, sunrise, sunset, and twilight calculations
+follow the public NOAA Solar Calculation Details reference:
+https://gml.noaa.gov/grad/solcalc/calcdetails.html

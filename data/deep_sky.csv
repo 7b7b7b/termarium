@@ -1,0 +1,111 @@
+name,kind,ra,dec,mag,con,common
+M1,Supernova Remnant,5.575547,22.014472,8.40,Tau,Crab Nebula
+M2,Globular Cluster,21.557503,-0.823306,6.25,Aqr,
+M3,Globular Cluster,13.703119,28.375444,6.39,CVn,
+M4,Globular Cluster,16.393167,-26.525528,5.40,Sco,
+M5,Globular Cluster,15.309375,2.082694,5.95,Ser,
+M6,Open Cluster,17.672431,-32.254167,4.20,Sco,Butterfly Cluster
+M7,Open Cluster,17.897550,-34.792833,3.30,Sco,Ptolemy's Cluster
+M8,Nebula,18.061464,-24.380167,5.80,Sgr,Lagoon Nebula
+M9,Globular Cluster,17.319939,-18.516250,8.42,Oph,
+M10,Globular Cluster,16.952497,-4.099333,4.98,Oph,
+M11,Open Cluster,18.851664,-6.270028,5.80,Sct,Amas de l'Ecu de Sobieski Wild Duck Cluster
+M12,Globular Cluster,16.787367,-1.947833,6.07,Oph,
+M13,Globular Cluster,16.694897,36.461306,5.80,Her,Hercules Globular Cluster
+M14,Globular Cluster,17.626711,-3.245917,5.73,Oph,
+M15,Globular Cluster,21.499550,12.166833,6.30,Peg,
+M16,Nebula,18.313381,-13.807222,6.00,Ser,Eagle Nebula
+M17,Nebula,18.346419,-16.171528,7.00,Sgr,Checkmark Nebula Lobster Nebula Swan Nebula omega Nebula
+M18,Open Cluster,18.332914,-17.101972,6.90,Sgr,
+M19,Globular Cluster,17.043800,-26.267944,5.57,Oph,
+M20,Nebula,18.045031,-22.971889,8.50,Sgr,Trifid Nebula
+M21,Open Cluster,18.070403,-22.490056,5.90,Sgr,
+M22,Globular Cluster,18.606722,-23.903417,6.17,Sgr,
+M23,Open Cluster,17.951325,-18.985333,5.50,Sgr,
+M24,Star Cloud,18.282256,-18.514556,4.50,Sgr,Small Sgr Star Cloud
+M25,Open Cluster,18.529658,-19.114944,4.60,Sgr,
+M26,Open Cluster,18.755183,-9.383611,8.87,Sct,
+M27,Planetary Nebula,19.993439,22.721028,7.40,Vul,Dumbbell Nebula
+M28,Globular Cluster,18.409136,-24.869833,6.90,Sgr,
+M29,Open Cluster,20.399381,38.507667,6.60,Cyg,
+M30,Globular Cluster,21.672783,-23.179083,7.10,Cap,
+M31,Galaxy,0.712319,41.269056,3.44,And,Andromeda Galaxy
+M32,Galaxy,0.711619,40.865278,8.13,And,
+M33,Galaxy,1.564136,30.660222,5.79,Tri,Triangulum Galaxy Triangulum Pinwheel
+M34,Open Cluster,2.702056,42.746139,5.20,Per,
+M35,Open Cluster,6.151406,24.338639,5.10,Gem,
+M36,Open Cluster,5.604928,34.140750,6.00,Aur,
+M37,Open Cluster,5.871764,32.553000,5.60,Aur,
+M38,Open Cluster,5.478469,35.854917,6.40,Aur,
+M39,Open Cluster,21.530089,48.438167,4.60,Cyg,
+M40,Double Star,12.3700,58.0833,8.4,UMa,Winnecke 4
+M41,Open Cluster,6.766650,-20.754222,4.50,CMa,
+M42,Cluster + Nebula,5.587911,-5.389667,4.00,Ori,Great Orion Nebula Orion Nebula
+M43,H II Region,5.592050,-5.267472,9.00,Ori,Mairan's Nebula
+M44,Open Cluster,8.672833,19.672056,3.10,Cnc,Beehive Praesepe Cluster
+M45,Open Cluster,3.7900,24.1167,1.6,Tau,Pleiades
+M46,Open Cluster,7.696339,-14.810000,6.10,Pup,
+M47,Open Cluster,7.609728,-14.482611,4.40,Pup,
+M48,Open Cluster,8.228661,-5.750444,5.80,Hya,
+M49,Galaxy,12.496322,8.000472,8.28,Vir,
+M50,Open Cluster,7.044575,-8.364028,5.90,Mon,
+M51,Galaxy,13.497975,47.195167,8.36,CVn,Whirlpool Galaxy
+M52,Open Cluster,23.413444,61.593167,6.90,Cas,
+M53,Globular Cluster,13.215342,18.169111,7.79,Com,
+M54,Globular Cluster,18.917575,-30.478500,7.70,Sgr,
+M55,Globular Cluster,19.666500,-30.962083,6.49,Sgr,
+M56,Globular Cluster,19.276531,30.184500,8.40,Lyr,
+M57,Planetary Nebula,18.893058,33.028583,8.80,Lyr,Ring Nebula
+M58,Galaxy,12.628756,11.818194,10.30,Vir,
+M59,Galaxy,12.700622,11.647028,9.56,Vir,
+M60,Galaxy,12.727772,11.552694,8.79,Vir,
+M61,Galaxy,12.365250,4.473639,10.25,Vir,
+M62,Globular Cluster,17.020167,-30.112361,7.39,Oph,
+M63,Galaxy,13.263703,42.029278,8.61,CVn,Sunflower Galaxy
+M64,Galaxy,12.945456,21.682972,8.52,Com,Black Eye Galaxy Evil Eye Galaxy
+M65,Galaxy,11.315533,13.092361,9.32,Leo,
+M66,Galaxy,11.337489,12.991528,8.92,Leo,
+M67,Open Cluster,8.855592,11.811944,6.90,Cnc,
+M68,Globular Cluster,12.657781,-26.743028,7.96,Hya,
+M69,Globular Cluster,18.523119,-32.347972,8.31,Sgr,
+M70,Globular Cluster,18.720178,-32.291889,9.06,Sgr,
+M71,Globular Cluster,19.896142,18.778389,6.10,Sge,
+M72,Globular Cluster,20.891086,-12.537056,8.96,Aqr,
+M73,Deep Sky,20.982214,-12.635500,8.90,Aqr,
+M74,Galaxy,1.611597,15.783667,9.31,Psc,
+M75,Globular Cluster,20.101344,-21.922222,8.26,Sgr,
+M76,Planetary Nebula,1.705469,51.575472,10.10,Per,Barbell Nebula Cork Nebula Little Dumbbell Nebula
+M77,Galaxy,2.711308,-0.013278,9.29,Cet,
+M78,Reflection Nebula,5.779394,0.079306,8.00,Ori,
+M79,Globular Cluster,5.402942,-24.524222,8.16,Lep,
+M80,Globular Cluster,16.284031,-22.975111,7.30,Sco,
+M81,Galaxy,9.925881,69.065306,6.92,UMa,Bode's Galaxy
+M82,Galaxy,9.931314,69.679389,8.30,UMa,Cigar Galaxy
+M83,Galaxy,13.616931,-29.865417,7.21,Hya,Southern Pinwheel Galaxy
+M84,Galaxy,12.417706,12.886972,9.79,Vir,
+M85,Galaxy,12.423364,18.191500,9.05,Com,
+M86,Galaxy,12.436594,12.946222,8.86,Vir,
+M87,Galaxy,12.513728,12.391111,9.00,Vir,Virgo Galaxy
+M88,Galaxy,12.533100,14.420389,10.33,Com,
+M89,Galaxy,12.594392,12.556333,10.08,Vir,
+M90,Galaxy,12.613831,13.162944,9.54,Vir,
+M91,Galaxy,12.590681,14.496333,10.96,Com,
+M92,Globular Cluster,17.285353,43.136528,6.52,Her,
+M93,Open Cluster,7.741453,-23.853083,6.20,Pup,
+M94,Galaxy,12.848072,41.120444,8.24,CVn,
+M95,Galaxy,10.732694,11.703806,9.77,Leo,
+M96,Galaxy,10.779372,11.819944,9.21,Leo,
+M97,Planetary Nebula,11.246586,55.019028,9.90,UMa,Owl Nebula
+M98,Galaxy,12.230081,14.900333,10.84,Com,
+M99,Galaxy,12.313778,14.416500,9.84,Com,Coma Pinwheel Virgo Cluster Pinwheel
+M100,Galaxy,12.381897,15.821806,9.47,Com,
+M101,Galaxy,14.053483,54.348944,7.90,UMa,
+M102,Galaxy,15.1082,55.7633,10.7,Dra,Spindle Galaxy
+M103,Open Cluster,1.556058,60.658000,7.40,Cas,
+M104,Galaxy,12.666508,-11.623056,8.59,Vir,Sombrero Galaxy
+M105,Galaxy,10.797108,12.581611,9.27,Leo,
+M106,Galaxy,12.315972,47.303972,9.29,CVn,
+M107,Globular Cluster,16.542200,-13.053639,8.85,Oph,
+M108,Galaxy,11.191936,55.674111,10.05,UMa,
+M109,Galaxy,11.959994,53.374528,9.88,UMa,
+M110,Galaxy,0.672800,41.685306,8.15,And,

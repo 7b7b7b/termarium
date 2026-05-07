@@ -1,0 +1,21 @@
+[package]
+name = "termarium"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+description = "A quiet terminal planetarium with a real bright-star sky map."
+readme = "README.md"
+license = "MIT AND CC-BY-SA-4.0 AND CC-BY-4.0"
+repository = "https://github.com/7b7b7b/termarium"
+keywords = ["terminal", "tui", "astronomy", "stars", "planetarium"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+clap = { version = "4.6", features = ["derive"] }
+crossterm = "0.29"
+directories = "6"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

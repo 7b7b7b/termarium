@@ -1,0 +1,191 @@
+mod app;
+mod astro;
+mod catalog;
+mod config;
+mod constellations;
+mod deep_sky;
+mod i18n;
+mod planets;
+mod solar;
+mod star_aliases;
+mod ui;
+
+use std::{collections::BTreeSet, error::Error};
+
+use chrono::{DateTime, Utc};
+use clap::{Parser, Subcommand};
+
+use crate::{
+    app::App,
+    catalog::Catalog,
+    config::{Charset, Config, Language, Location, Theme},
+};
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "termarium",
+    version,
+    about = "A quiet terminal planetarium.",
+    long_about = "Termarium opens a full-screen terminal planetarium using a real bright-star catalog."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[arg(long, help = "Observer latitude in degrees.")]
+    lat: Option<f64>,
+
+    #[arg(long, help = "Observer longitude in degrees.")]
+    lon: Option<f64>,
+
+    #[arg(long, help = "Observer label shown in the TUI.")]
+    name: Option<String>,
+
+    #[arg(long, value_enum, help = "Interface language.")]
+    lang: Option<Language>,
+
+    #[arg(
+        long,
+        help = "Observer timezone as an IANA name, such as Asia/Shanghai."
+    )]
+    tz: Option<String>,
+
+    #[arg(long, value_enum, help = "Color theme.")]
+    theme: Option<Theme>,
+
+    #[arg(long, value_enum, help = "Sky canvas character mode.")]
+    charset: Option<Charset>,
+
+    #[arg(long, help = "Freeze the sky at an RFC3339 timestamp.")]
+    time: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    #[command(about = "Open the location setup screen.")]
+    Setup,
+    #[command(about = "Print the config file path.")]
+    Config,
+    #[command(about = "Print bundled star catalog information.")]
+    CatalogInfo,
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    let config_path = config::config_path()?;
+
+    match cli.command {
+        Some(Command::Config) => {
+            println!("{}", config_path.display());
+            return Ok(());
+        }
+        Some(Command::CatalogInfo) => {
+            let catalog = Catalog::load();
+            let constellation_lines = constellations::load();
+            let deep_sky = deep_sky::load();
+            let named = catalog
+                .stars
+                .iter()
+                .filter(|star| !star.proper.is_empty())
+                .count();
+            let hip_min = catalog.stars.iter().map(|star| star.hip).min().unwrap_or(0);
+            let hip_max = catalog.stars.iter().map(|star| star.hip).max().unwrap_or(0);
+            let constellations = catalog
+                .stars
+                .iter()
+                .map(|star| star.constellation)
+                .collect::<BTreeSet<_>>()
+                .len();
+            println!("Termarium star catalog");
+            println!("source: HYG Database v4.2");
+            println!("star license: CC BY-SA 4.0");
+            println!("line source: ConstellationLines");
+            println!("line license: CC BY 4.0");
+            println!("deep-sky source: OpenNGC v20260501");
+            println!("deep-sky license: CC BY-SA 4.0");
+            println!("stars: {}", catalog.stars.len());
+            println!("named stars: {named}");
+            println!("curated star aliases: {}", star_aliases::STAR_ALIASES.len());
+            println!("hip range: {hip_min}..{hip_max}");
+            println!("constellations: {constellations}");
+            println!("built-in line figures: {}", constellation_lines.len());
+            println!(
+                "built-in line segments: {}",
+                constellation_lines
+                    .iter()
+                    .map(constellations::ConstellationLine::segment_count)
+                    .sum::<usize>()
+            );
+            println!("deep-sky objects: {}", deep_sky.len());
+            println!("limiting magnitude: <= 6.0");
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    let stored_config = config::load_config(&config_path)?;
+    let stored_exists = stored_config.is_some();
+    let mut app_config = stored_config.unwrap_or_default();
+    let session_location = apply_overrides(&mut app_config, &cli)?;
+    let time_override = cli.time.as_deref().map(parse_time).transpose()?;
+
+    let force_setup = matches!(cli.command, Some(Command::Setup));
+    let should_setup = force_setup || (!stored_exists && !session_location);
+    let catalog = Catalog::load();
+    let app = App::new(
+        app_config,
+        config_path,
+        catalog,
+        should_setup,
+        stored_exists || session_location,
+        time_override,
+    );
+
+    ui::run(app)?;
+    Ok(())
+}
+
+fn apply_overrides(config: &mut Config, cli: &Cli) -> Result<bool, Box<dyn Error>> {
+    if let Some(language) = cli.lang {
+        config.language = language;
+    }
+    if let Some(theme) = cli.theme {
+        config.display.theme = theme;
+    }
+    if let Some(charset) = cli.charset {
+        config.display.charset = charset;
+    }
+
+    let has_location_override = cli.lat.is_some() || cli.lon.is_some();
+    if has_location_override {
+        let lat = cli.lat.ok_or("--lat and --lon must be supplied together")?;
+        let lon = cli.lon.ok_or("--lat and --lon must be supplied together")?;
+        let name = cli.name.clone().unwrap_or_else(|| "Custom".to_string());
+        let timezone = cli
+            .tz
+            .clone()
+            .unwrap_or_else(|| config.location.timezone.clone());
+        config.location = Location {
+            name,
+            latitude: lat,
+            longitude: lon,
+            timezone,
+        };
+        config.validate()?;
+        return Ok(true);
+    }
+
+    if let Some(name) = &cli.name {
+        config.location.name = name.clone();
+    }
+    if let Some(timezone) = &cli.tz {
+        config.location.timezone = timezone.clone();
+        config.validate()?;
+    }
+
+    Ok(false)
+}
+
+fn parse_time(raw: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(raw).map(|time| time.with_timezone(&Utc))
+}
