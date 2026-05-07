@@ -21,7 +21,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{self, App, Screen, Target},
+    app::{self, App, Screen, Target, ViewMode},
     astro,
     config::{Language, Location, Theme},
     constellations, i18n, planets, solar, star_aliases,
@@ -51,6 +51,54 @@ struct SkyCell {
     ch: char,
     style: Style,
 }
+
+#[derive(Debug, Clone, Copy)]
+struct MotionVector {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RgbColor {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+impl RgbColor {
+    fn new(r: f64, g: f64, b: f64) -> Self {
+        Self { r, g, b }
+    }
+
+    fn mix(from: Self, to: Self, progress: f64) -> Self {
+        let progress = progress.clamp(0.0, 1.0);
+        Self {
+            r: lerp_f64(from.r, to.r, progress),
+            g: lerp_f64(from.g, to.g, progress),
+            b: lerp_f64(from.b, to.b, progress),
+        }
+    }
+
+    fn scale(self, brightness: f64) -> Self {
+        Self {
+            r: self.r * brightness,
+            g: self.g * brightness,
+            b: self.b * brightness,
+        }
+    }
+
+    fn to_color(self) -> Color {
+        Color::Rgb(
+            self.r.round().clamp(0.0, 255.0) as u8,
+            self.g.round().clamp(0.0, 255.0) as u8,
+            self.b.round().clamp(0.0, 255.0) as u8,
+        )
+    }
+}
+
+const EARTH_TEXTURE_WIDTH: usize = 720;
+const EARTH_TEXTURE_HEIGHT: usize = 360;
+const EARTH_TEXTURE: &[u8] = include_bytes!("../data/earth_720x360.rgb");
 
 pub fn run(mut app: App) -> io::Result<()> {
     enable_raw_mode()?;
@@ -180,11 +228,7 @@ fn draw_sky(frame: &mut Frame, app: &mut App, palette: Palette) {
         area,
     );
 
-    let wants_panel = app.config.display.side_panel
-        && (app.config.display.moon_panel
-            || app.show_recommendations
-            || app.selected_target.is_some()
-            || app.pointer.active);
+    let wants_panel = app.config.display.side_panel;
 
     if wants_panel && area.width >= 94 {
         let chunks = Layout::default()
@@ -215,7 +259,13 @@ fn draw_sky_column(frame: &mut Frame, app: &mut App, area: Rect, palette: Palett
         ])
         .split(area);
     draw_header(frame, app, rows[0], palette);
-    draw_star_canvas(frame, app, rows[1], palette);
+    if app.horizon_transition().is_some() {
+        draw_horizon_canvas(frame, app, rows[1], palette);
+    } else if app.view_mode == ViewMode::Ground {
+        draw_ground_canvas(frame, app, rows[1], palette);
+    } else {
+        draw_star_canvas(frame, app, rows[1], palette);
+    }
     draw_footer(frame, app, rows[2], palette);
 }
 
@@ -223,13 +273,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     let language = app.config.language;
     let now = app.now();
     let timezone = app
-        .config
-        .location
+        .active_location()
         .timezone
         .parse::<Tz>()
         .unwrap_or(chrono_tz::UTC);
     let local_time = now.with_timezone(&timezone).format("%Y-%m-%d %H:%M:%S %Z");
-    let location = &app.config.location;
+    let location = app.active_location();
     let mode = if app.paused {
         i18n::tr(language, "paused")
     } else {
@@ -304,35 +353,107 @@ fn draw_star_canvas(frame: &mut Frame, app: &mut App, area: Rect, palette: Palet
 
     app.set_pointer_canvas(inner.width as usize, inner.height as usize);
 
-    let lines = if app.should_render_zoomed_sky() && app.zoom_render_code().is_some() {
-        zoomed_sky_lines(app, inner.width as usize, inner.height as usize, palette).unwrap_or_else(
-            || {
-                sky_lines(
-                    app,
-                    &visible,
-                    &sky_location,
-                    inner.width as usize,
-                    inner.height as usize,
-                    palette,
-                )
-            },
-        )
-    } else {
-        sky_lines(
-            app,
-            &visible,
-            &sky_location,
-            inner.width as usize,
-            inner.height as usize,
-            palette,
-        )
-    };
+    let lines = sky_canvas_lines(
+        app,
+        &visible,
+        &sky_location,
+        inner.width as usize,
+        inner.height as usize,
+        palette,
+    );
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn sky_canvas_lines(
+    app: &App,
+    visible: &[astro::VisibleStar],
+    sky_location: &Location,
+    width: usize,
+    height: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    if app.should_render_zoomed_sky() && app.zoom_render_code().is_some() {
+        zoomed_sky_lines(app, width, height, palette)
+            .unwrap_or_else(|| sky_lines(app, visible, sky_location, width, height, palette))
+    } else {
+        sky_lines(app, visible, sky_location, width, height, palette)
+    }
+}
+
+fn draw_ground_canvas(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
+    let language = app.config.language;
+    let base_block = Block::default().borders(Borders::ALL);
+    let inner = base_block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(
+            base_block
+                .title(ground_title_line(language, palette))
+                .border_style(Style::default().fg(palette.dim_line))
+                .style(Style::default().bg(palette.bg)),
+            area,
+        );
+        return;
+    }
+
+    let block = base_block
+        .title(ground_title_line(language, palette))
+        .title_top(ground_stat_title(app, language, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.dim_line))
+        .style(Style::default().bg(palette.bg));
+    frame.render_widget(block, area);
+
+    let grid = ground_grid(app, inner.width as usize, inner.height as usize, palette);
+    frame.render_widget(Paragraph::new(grid_to_lines(grid)), inner);
+}
+
+fn draw_horizon_canvas(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
+    let language = app.config.language;
+    let base_block = Block::default().borders(Borders::ALL);
+    let inner = base_block.inner(area);
+    if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(
+            base_block
+                .title(horizon_title_line(language, palette))
+                .border_style(Style::default().fg(palette.dim_line))
+                .style(Style::default().bg(palette.bg)),
+            area,
+        );
+        return;
+    }
+
+    let block = base_block
+        .title(horizon_title_line(language, palette))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.dim_line))
+        .style(Style::default().bg(palette.bg));
+    frame.render_widget(block, area);
+
+    let grid = horizon_transition_grid(app, inner.width as usize, inner.height as usize, palette);
+    frame.render_widget(Paragraph::new(grid_to_lines(grid)), inner);
 }
 
 fn sky_title_line(language: Language, palette: Palette) -> Line<'static> {
     Line::from(Span::styled(
         format!(" {} ", i18n::tr(language, "sky")),
+        Style::default()
+            .fg(palette.cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn ground_title_line(language: Language, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", i18n::tr(language, "ground")),
+        Style::default()
+            .fg(palette.cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn horizon_title_line(language: Language, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", i18n::tr(language, "horizon")),
         Style::default()
             .fg(palette.cyan)
             .add_modifier(Modifier::BOLD),
@@ -371,6 +492,772 @@ fn sky_stat_title(
         Style::default().fg(palette.muted).bg(palette.bg),
     ))
     .right_aligned()
+}
+
+fn ground_stat_title(app: &App, language: Language, palette: Palette) -> Line<'static> {
+    let preview = &app.ground.preview_location;
+    Line::from(Span::styled(
+        format!(
+            " {} {:+.1} {:+.1} · {} {} · g {} ",
+            i18n::tr(language, "ground_cursor"),
+            preview.latitude,
+            preview.longitude,
+            i18n::tr(language, "timezone"),
+            preview.timezone,
+            i18n::tr(language, "sky")
+        ),
+        Style::default().fg(palette.muted).bg(palette.bg),
+    ))
+    .right_aligned()
+}
+
+fn horizon_transition_grid(
+    app: &App,
+    width: usize,
+    height: usize,
+    palette: Palette,
+) -> Vec<Vec<SkyCell>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let Some((from, to, progress)) = app.horizon_transition() else {
+        return match app.view_mode {
+            ViewMode::Sky => sky_canvas_grid(app, width, height, palette),
+            ViewMode::Ground => ground_grid(app, width, height, palette),
+        };
+    };
+    let final_sky = sky_canvas_grid(app, width, height, palette);
+    let globe = globe_layer_grid(app, width, height, palette);
+    let globe_projection =
+        GlobeProjection::new(width, height, app.ground.cursor_lat, app.ground.cursor_lon);
+    let ground = ground_grid(app, width, height, palette);
+    let look_up = match (from, to) {
+        (ViewMode::Sky, ViewMode::Ground) => 1.0 - progress,
+        (ViewMode::Ground, ViewMode::Sky) => progress,
+        _ => progress,
+    }
+    .clamp(0.0, 1.0);
+
+    if look_up <= 0.02 {
+        return ground;
+    }
+    if look_up >= 0.999 {
+        return final_sky;
+    }
+
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default().fg(palette.muted).bg(palette.bg),
+    };
+
+    let (location_progress, shape_progress) = staged_horizon_sky_phase(from, to, progress, look_up);
+    let mut grid = horizon_sky_grid(
+        app,
+        width,
+        height,
+        palette,
+        location_progress,
+        shape_progress,
+    );
+    let motion = horizon_motion_vector(app);
+    let (globe_offset_x, globe_offset_y) =
+        globe_motion_offset(from, to, progress, width, height, motion);
+    for y in 0..height {
+        for x in 0..width {
+            let ground_cell = shifted_globe_cell(
+                &globe,
+                globe_projection,
+                x,
+                y,
+                globe_offset_x,
+                globe_offset_y,
+                empty,
+            )
+            .unwrap_or(empty);
+            if ground_cell.ch != ' ' || ground_cell.style.bg != Some(palette.bg) {
+                grid[y][x] = ground_cell;
+            }
+        }
+    }
+
+    grid
+}
+
+fn sky_canvas_grid(app: &App, width: usize, height: usize, palette: Palette) -> Vec<Vec<SkyCell>> {
+    let sky_location = app.render_location();
+    sky_canvas_grid_for_location(app, &sky_location, width, height, palette)
+}
+
+fn sky_canvas_grid_for_location(
+    app: &App,
+    sky_location: &Location,
+    width: usize,
+    height: usize,
+    palette: Palette,
+) -> Vec<Vec<SkyCell>> {
+    let visible = astro::visible_stars(
+        &app.catalog.stars,
+        sky_location,
+        app.now(),
+        app.config.display.limiting_magnitude,
+        width,
+        height,
+    );
+    let lines = sky_canvas_lines(app, &visible, sky_location, width, height, palette);
+    lines_to_grid(lines, width, height, palette)
+}
+
+fn horizon_sky_grid(
+    app: &App,
+    width: usize,
+    height: usize,
+    palette: Palette,
+    location_progress: f64,
+    shape_progress: f64,
+) -> Vec<Vec<SkyCell>> {
+    let location = horizon_observer_location(app, location_progress);
+    let time = app.now();
+    let mut visible = app
+        .catalog
+        .stars
+        .iter()
+        .copied()
+        .filter(|star| star.magnitude <= app.config.display.limiting_magnitude)
+        .filter_map(|star| {
+            let horizontal =
+                astro::horizontal_position(star.ra_hours, star.dec_degrees, &location, time);
+            let (x, y) = horizon_sky_project(
+                horizontal.altitude,
+                horizontal.azimuth,
+                width,
+                height,
+                shape_progress,
+            )?;
+            Some(astro::VisibleStar { star, x, y })
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by(|a, b| {
+        a.star
+            .magnitude
+            .partial_cmp(&b.star.magnitude)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default().fg(palette.muted).bg(palette.bg),
+    };
+    let mut grid = vec![vec![empty; width]; height];
+    let unicode = app.config.display.charset.canvas_unicode();
+
+    for star in visible.iter().rev() {
+        set_cell(
+            &mut grid,
+            star.x,
+            star.y,
+            star_symbol(star.star.magnitude, unicode, app.animation_tick),
+            star_style(star.star.magnitude, star.star.color_index, palette),
+        );
+    }
+
+    if app.config.display.constellations {
+        if shape_progress < 0.96 {
+            draw_backdrop_constellation_lines(&mut grid, &visible, app, width, palette, unicode);
+        } else {
+            draw_constellation_lines(&mut grid, &visible, app, width, height, palette, unicode);
+        }
+    }
+
+    draw_deep_sky(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            horizon_sky_project(
+                horizontal.altitude,
+                horizontal.azimuth,
+                width,
+                height,
+                shape_progress,
+            )
+        },
+        palette,
+        unicode,
+    );
+    draw_planets(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            horizon_sky_project(
+                horizontal.altitude,
+                horizontal.azimuth,
+                width,
+                height,
+                shape_progress,
+            )
+        },
+        palette,
+        unicode,
+    );
+
+    if location_progress > 0.98 && shape_progress > 0.92 {
+        if app.config.display.constellations {
+            draw_constellation_labels(&mut grid, &visible, app, width, height, palette, unicode);
+        }
+        if app.config.display.labels {
+            for star in visible
+                .iter()
+                .filter(|star| !star.star.proper.is_empty() && star.star.magnitude <= 1.65)
+                .take(9)
+            {
+                draw_label(
+                    &mut grid,
+                    star.x,
+                    star.y,
+                    star.star.proper,
+                    palette,
+                    unicode,
+                );
+            }
+        }
+        draw_planet_labels(
+            &mut grid,
+            app,
+            |ra, dec| {
+                let horizontal = astro::horizontal_position(ra, dec, &location, time);
+                horizon_sky_project(
+                    horizontal.altitude,
+                    horizontal.azimuth,
+                    width,
+                    height,
+                    shape_progress,
+                )
+            },
+            palette,
+            unicode,
+        );
+        if !app.pointer.active {
+            draw_selected_label(
+                &mut grid,
+                app,
+                |ra, dec| {
+                    let horizontal = astro::horizontal_position(ra, dec, &location, time);
+                    horizon_sky_project(
+                        horizontal.altitude,
+                        horizontal.azimuth,
+                        width,
+                        height,
+                        shape_progress,
+                    )
+                },
+                palette,
+                unicode,
+            );
+        }
+    }
+
+    grid
+}
+
+fn horizon_sky_project(
+    altitude: f64,
+    azimuth: f64,
+    width: usize,
+    height: usize,
+    shape_progress: f64,
+) -> Option<(usize, usize)> {
+    if altitude < 0.0 || width == 0 || height == 0 {
+        return None;
+    }
+
+    let radius = ((90.0 - altitude) / 90.0).clamp(0.0, 1.0);
+    let center_x = width.saturating_sub(1) as f64 / 2.0;
+    let center_y = height.saturating_sub(1) as f64 / 2.0;
+    let x_radius = center_x.max(1.0);
+    let y_radius = center_y.max(1.0);
+    let scale = lerp_f64(1.58, 1.0, shape_progress);
+    let azimuth = azimuth.to_radians();
+    let x = center_x + azimuth.sin() * radius * x_radius * scale;
+    let y = center_y - azimuth.cos() * radius * y_radius * scale;
+
+    if !x.is_finite() || !y.is_finite() {
+        return None;
+    }
+
+    if !(0.0..=width.saturating_sub(1) as f64).contains(&x)
+        || !(0.0..=height.saturating_sub(1) as f64).contains(&y)
+    {
+        return None;
+    }
+
+    Some((x.round() as usize, y.round() as usize))
+}
+
+fn horizon_observer_location(app: &App, progress: f64) -> Location {
+    let from = antipode_location(app);
+    let to = app.render_location();
+    let t = progress.clamp(0.0, 1.0);
+    let longitude_direction = if app.ground.cursor_lon >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    Location {
+        name: format!("{} -> {}", from.name, to.name),
+        latitude: lerp_f64(from.latitude, to.latitude, t),
+        longitude: normalize_degrees(from.longitude + 180.0 * longitude_direction * t),
+        timezone: to.timezone,
+    }
+}
+
+fn antipode_location(app: &App) -> Location {
+    Location {
+        name: "Antipode".to_string(),
+        latitude: -app.ground.cursor_lat,
+        longitude: normalize_degrees(app.ground.cursor_lon + 180.0),
+        timezone: "UTC".to_string(),
+    }
+}
+
+fn ground_grid(app: &App, width: usize, height: usize, palette: Palette) -> Vec<Vec<SkyCell>> {
+    let mut grid = horizon_sky_grid(app, width, height, palette, 0.0, 0.0);
+    let unicode = app.config.display.charset.canvas_unicode();
+
+    draw_globe_layer(&mut grid, app, width, height, palette, unicode);
+    draw_ground_overlay(&mut grid, app, palette, unicode);
+
+    grid
+}
+
+fn globe_layer_grid(app: &App, width: usize, height: usize, palette: Palette) -> Vec<Vec<SkyCell>> {
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default().fg(palette.muted).bg(palette.bg),
+    };
+    let mut grid = vec![vec![empty; width]; height];
+    let unicode = app.config.display.charset.canvas_unicode();
+
+    draw_globe_layer(&mut grid, app, width, height, palette, unicode);
+
+    grid
+}
+
+fn draw_globe_layer(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    width: usize,
+    height: usize,
+    palette: Palette,
+    unicode: bool,
+) {
+    if let Some(globe) =
+        GlobeProjection::new(width, height, app.ground.cursor_lat, app.ground.cursor_lon)
+    {
+        draw_globe_fill(grid, app, globe);
+        draw_globe_graticule(grid, globe, palette, unicode);
+        draw_globe_markers(grid, app, globe, palette, unicode);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlobeProjection {
+    width: usize,
+    height: usize,
+    center_x: f64,
+    center_y: f64,
+    radius_x: f64,
+    radius_y: f64,
+    center_lat_rad: f64,
+    center_lon_deg: f64,
+    center_lon_rad: f64,
+}
+
+impl GlobeProjection {
+    fn new(width: usize, height: usize, center_lat: f64, center_lon: f64) -> Option<Self> {
+        if width < 8 || height < 5 {
+            return None;
+        }
+        let radius_y = ((height as f64 - 2.0) / 2.0)
+            .min((width as f64 - 4.0) / 4.0)
+            .max(1.0);
+        Some(Self {
+            width,
+            height,
+            center_x: width.saturating_sub(1) as f64 / 2.0,
+            center_y: height.saturating_sub(1) as f64 / 2.0,
+            radius_x: radius_y * 2.0,
+            radius_y,
+            center_lat_rad: center_lat.clamp(-89.5, 89.5).to_radians(),
+            center_lon_deg: normalize_degrees(center_lon),
+            center_lon_rad: normalize_degrees(center_lon).to_radians(),
+        })
+    }
+
+    fn project(self, lon: f64, lat: f64) -> Option<(usize, usize)> {
+        let lat_rad = lat.to_radians();
+        let delta_lon = normalize_degrees(lon - self.center_lon_deg).to_radians();
+        let (sin_lat, cos_lat) = lat_rad.sin_cos();
+        let (sin_center, cos_center) = self.center_lat_rad.sin_cos();
+        let (sin_delta, cos_delta) = delta_lon.sin_cos();
+        let visible = sin_center * sin_lat + cos_center * cos_lat * cos_delta;
+        if visible < -0.01 {
+            return None;
+        }
+
+        let x = self.center_x + self.radius_x * cos_lat * sin_delta;
+        let y = self.center_y
+            - self.radius_y * (cos_center * sin_lat - sin_center * cos_lat * cos_delta);
+        if !(0.0..=self.width.saturating_sub(1) as f64).contains(&x)
+            || !(0.0..=self.height.saturating_sub(1) as f64).contains(&y)
+        {
+            return None;
+        }
+        Some((x.round() as usize, y.round() as usize))
+    }
+
+    fn lon_lat_at(self, x: usize, y: usize) -> Option<(f64, f64)> {
+        let normalized_x = (x as f64 - self.center_x) / self.radius_x;
+        let normalized_y = (self.center_y - y as f64) / self.radius_y;
+        let rho_squared = normalized_x * normalized_x + normalized_y * normalized_y;
+        if rho_squared > 1.0 {
+            return None;
+        }
+        let rho = rho_squared.sqrt();
+        if rho <= f64::EPSILON {
+            return Some((self.center_lon_deg, self.center_lat_rad.to_degrees()));
+        }
+
+        let cos_c = (1.0 - rho_squared).sqrt();
+        let (sin_center, cos_center) = self.center_lat_rad.sin_cos();
+        let lat = (cos_c * sin_center + normalized_y * cos_center)
+            .clamp(-1.0, 1.0)
+            .asin();
+        let lon = self.center_lon_rad
+            + normalized_x.atan2(cos_center * cos_c - normalized_y * sin_center);
+        Some((normalize_degrees(lon.to_degrees()), lat.to_degrees()))
+    }
+}
+
+fn draw_globe_fill(grid: &mut [Vec<SkyCell>], app: &App, globe: GlobeProjection) {
+    let height = grid.len();
+    let width = grid.first().map_or(0, Vec::len);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let sun = solar::sun_position(app.now());
+    let gmst_hours = astro::local_sidereal_time_hours(app.now(), 0.0);
+    let subsolar_lon = normalize_degrees((sun.ra_hours - gmst_hours) * 15.0);
+    let sun_lat = sun.dec_degrees.to_radians();
+
+    for y in 0..height {
+        for x in 0..width {
+            let Some((lon, lat)) = globe.lon_lat_at(x, y) else {
+                continue;
+            };
+            let altitude = solar_altitude(lat.to_radians(), lon, sun_lat, subsolar_lon);
+            let color = globe_surface_color(lon, lat, altitude).to_color();
+            set_cell(grid, x, y, ' ', Style::default().fg(color).bg(color));
+        }
+    }
+}
+
+fn globe_surface_color(lon: f64, lat: f64, solar_altitude: f64) -> RgbColor {
+    let base = earth_texture_color(lon, lat);
+    sunlight_color(base, solar_altitude)
+}
+
+fn earth_texture_color(lon: f64, lat: f64) -> RgbColor {
+    let x = ((normalize_degrees(lon) + 180.0) / 360.0) * EARTH_TEXTURE_WIDTH as f64;
+    let y =
+        ((90.0 - lat.clamp(-90.0, 90.0)) / 180.0) * EARTH_TEXTURE_HEIGHT.saturating_sub(1) as f64;
+    let x0 = x.floor() as usize % EARTH_TEXTURE_WIDTH;
+    let x1 = (x0 + 1) % EARTH_TEXTURE_WIDTH;
+    let y0 = y
+        .floor()
+        .clamp(0.0, EARTH_TEXTURE_HEIGHT.saturating_sub(1) as f64) as usize;
+    let y1 = (y0 + 1).min(EARTH_TEXTURE_HEIGHT - 1);
+    let tx = x.fract();
+    let ty = y.fract();
+    let top = RgbColor::mix(earth_texture_pixel(x0, y0), earth_texture_pixel(x1, y0), tx);
+    let bottom = RgbColor::mix(earth_texture_pixel(x0, y1), earth_texture_pixel(x1, y1), tx);
+    RgbColor::mix(top, bottom, ty)
+}
+
+fn earth_texture_pixel(x: usize, y: usize) -> RgbColor {
+    let offset = (y * EARTH_TEXTURE_WIDTH + x) * 3;
+    RgbColor::new(
+        EARTH_TEXTURE[offset] as f64,
+        EARTH_TEXTURE[offset + 1] as f64,
+        EARTH_TEXTURE[offset + 2] as f64,
+    )
+}
+
+fn sunlight_color(base: RgbColor, altitude: f64) -> RgbColor {
+    let daylight = smootherstep01((altitude + 8.0) / 30.0);
+    let brightness = lerp_f64(0.38, 1.24, daylight);
+    base.scale(brightness)
+}
+
+fn draw_globe_graticule(
+    grid: &mut [Vec<SkyCell>],
+    globe: GlobeProjection,
+    palette: Palette,
+    unicode: bool,
+) {
+    let style = Style::default().fg(palette.veil);
+    let ch = if unicode { '·' } else { '.' };
+
+    for lat in (-60..=60).step_by(30) {
+        draw_globe_polyline(
+            grid,
+            (-180..=180).step_by(2).map(|lon| (lon as f64, lat as f64)),
+            globe,
+            style,
+            ch,
+            unicode,
+        );
+    }
+    for lon in (-150..=150).step_by(30) {
+        draw_globe_polyline(
+            grid,
+            (-90..=90).step_by(2).map(|lat| (lon as f64, lat as f64)),
+            globe,
+            style,
+            ch,
+            unicode,
+        );
+    }
+}
+
+fn draw_globe_polyline<I>(
+    grid: &mut [Vec<SkyCell>],
+    points: I,
+    globe: GlobeProjection,
+    style: Style,
+    point: char,
+    unicode: bool,
+) where
+    I: IntoIterator<Item = (f64, f64)>,
+{
+    let mut previous = None;
+    for (lon, lat) in points {
+        let Some((x, y)) = globe.project(lon, lat) else {
+            previous = None;
+            continue;
+        };
+        if let Some((previous_x, previous_y)) = previous {
+            if x.abs_diff(previous_x) as f64 <= globe.radius_x * 0.65
+                && y.abs_diff(previous_y) as f64 <= globe.radius_y * 0.65
+            {
+                draw_line_overlay(grid, previous_x, previous_y, x, y, style, unicode);
+            }
+        }
+        set_cell_overlay(grid, x, y, point, style);
+        previous = Some((x, y));
+    }
+}
+
+fn draw_globe_markers(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    globe: GlobeProjection,
+    palette: Palette,
+    unicode: bool,
+) {
+    let saved = &app.config.location;
+    if (saved.latitude - app.ground.preview_location.latitude).abs() > 0.0001
+        || (saved.longitude - app.ground.preview_location.longitude).abs() > 0.0001
+    {
+        if let Some((x, y)) = globe.project(saved.longitude, saved.latitude) {
+            set_cell_overlay(grid, x, y, '+', Style::default().fg(palette.warm));
+        }
+    }
+
+    if let Some((x, y)) = globe.project(app.ground.cursor_lon, app.ground.cursor_lat) {
+        let style = Style::default()
+            .fg(palette.selected)
+            .add_modifier(Modifier::BOLD);
+        set_cell_overlay(grid, x, y, if unicode { '◎' } else { '@' }, style);
+        set_cell_offset_overlay(grid, x, y, -2, 0, if unicode { '─' } else { '-' }, style);
+        set_cell_offset_overlay(grid, x, y, -1, 0, if unicode { '─' } else { '-' }, style);
+        set_cell_offset_overlay(grid, x, y, 1, 0, if unicode { '─' } else { '-' }, style);
+        set_cell_offset_overlay(grid, x, y, 2, 0, if unicode { '─' } else { '-' }, style);
+        set_cell_offset_overlay(grid, x, y, 0, -1, if unicode { '│' } else { '|' }, style);
+        set_cell_offset_overlay(grid, x, y, 0, 1, if unicode { '│' } else { '|' }, style);
+    }
+}
+
+fn draw_ground_overlay(grid: &mut [Vec<SkyCell>], app: &App, palette: Palette, unicode: bool) {
+    if grid.is_empty() || grid[0].is_empty() {
+        return;
+    }
+    let preview = &app.ground.preview_location;
+    let text = format!(
+        "{} {:+.1} {:+.1} · {}",
+        i18n::tr(app.config.language, "ground_cursor"),
+        preview.latitude,
+        preview.longitude,
+        preview.timezone
+    );
+    draw_text(
+        grid,
+        1,
+        0,
+        &text,
+        Style::default().fg(palette.silver).bg(palette.bg),
+        unicode,
+    );
+}
+
+fn normalize_degrees(degrees: f64) -> f64 {
+    ((degrees + 180.0).rem_euclid(360.0)) - 180.0
+}
+
+fn lerp_f64(from: f64, to: f64, progress: f64) -> f64 {
+    from + (to - from) * progress.clamp(0.0, 1.0)
+}
+
+fn smootherstep01(progress: f64) -> f64 {
+    let t = progress.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+fn staged_transition_sky_progress(
+    from: ViewMode,
+    to: ViewMode,
+    progress: f64,
+    look_up: f64,
+) -> f64 {
+    if matches!((from, to), (ViewMode::Ground, ViewMode::Sky)) {
+        ((progress - 0.14) / 0.86).clamp(0.0, 1.0)
+    } else {
+        look_up
+    }
+}
+
+fn staged_horizon_sky_phase(
+    from: ViewMode,
+    to: ViewMode,
+    progress: f64,
+    look_up: f64,
+) -> (f64, f64) {
+    match (from, to) {
+        (ViewMode::Ground, ViewMode::Sky) => {
+            let p = staged_transition_sky_progress(from, to, progress, look_up);
+            let location = smootherstep01((p / 0.56).clamp(0.0, 1.0));
+            let shape = smootherstep01((p / 0.88).clamp(0.0, 1.0));
+            (location, shape)
+        }
+        (ViewMode::Sky, ViewMode::Ground) => {
+            let p = progress.clamp(0.0, 1.0);
+            let shape = 1.0 - smootherstep01((p / 0.56).clamp(0.0, 1.0));
+            let location = 1.0 - smootherstep01((p / 0.88).clamp(0.0, 1.0));
+            (location, shape)
+        }
+        _ => (look_up, look_up),
+    }
+}
+
+fn horizon_motion_vector(app: &App) -> MotionVector {
+    let lon = app.ground.cursor_lon.to_radians();
+    let lat = app.ground.cursor_lat.to_radians();
+    let lat_weight = lat.cos().abs().max(0.35);
+    let x = lon.sin() * lat_weight * 1.35;
+    let y = -lon.cos() * lat_weight - lat.sin() * 0.55;
+    let length = (x * x + y * y).sqrt();
+    if length <= f64::EPSILON {
+        MotionVector { x: 0.0, y: 1.0 }
+    } else {
+        MotionVector {
+            x: x / length,
+            y: y / length,
+        }
+    }
+}
+
+fn globe_motion_offset(
+    from: ViewMode,
+    to: ViewMode,
+    progress: f64,
+    width: usize,
+    height: usize,
+    motion: MotionVector,
+) -> (f64, f64) {
+    let travel = (width.max(height) as f64 * 0.78).max(height as f64 * 1.15);
+    let amount = match (from, to) {
+        (ViewMode::Ground, ViewMode::Sky) => smootherstep01((progress / 0.44).clamp(0.0, 1.0)),
+        (ViewMode::Sky, ViewMode::Ground) => {
+            1.0 - smootherstep01(((progress - 0.42) / 0.42).clamp(0.0, 1.0))
+        }
+        _ => 0.0,
+    };
+    (motion.x * travel * amount, motion.y * travel * amount)
+}
+
+fn shifted_globe_cell(
+    globe_layer: &[Vec<SkyCell>],
+    globe: Option<GlobeProjection>,
+    x: usize,
+    y: usize,
+    offset_x: f64,
+    offset_y: f64,
+    fallback: SkyCell,
+) -> Option<SkyCell> {
+    let source_x = x as f64 - offset_x;
+    let source_y = y as f64 - offset_y;
+    if source_x < 0.0 || source_y < 0.0 {
+        return None;
+    }
+    let sx = source_x.round() as usize;
+    let sy = source_y.round() as usize;
+    let cell = globe_layer
+        .get(sy)
+        .and_then(|row| row.get(sx))
+        .copied()
+        .unwrap_or(fallback);
+    let contains_globe = globe.is_some_and(|projection| projection.lon_lat_at(sx, sy).is_some());
+    (contains_globe || cell.ch != ' ').then_some(cell)
+}
+
+fn solar_altitude(lat: f64, lon: f64, sun_lat: f64, subsolar_lon: f64) -> f64 {
+    let delta_lon = (lon - subsolar_lon).to_radians();
+    (lat.sin() * sun_lat.sin() + lat.cos() * sun_lat.cos() * delta_lon.cos())
+        .clamp(-1.0, 1.0)
+        .asin()
+        .to_degrees()
+}
+
+fn lines_to_grid(
+    lines: Vec<Line<'static>>,
+    width: usize,
+    height: usize,
+    palette: Palette,
+) -> Vec<Vec<SkyCell>> {
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default().fg(palette.muted).bg(palette.bg),
+    };
+    let mut grid = vec![vec![empty; width]; height];
+    for (y, line) in lines.into_iter().take(height).enumerate() {
+        let mut x = 0usize;
+        for span in line.spans {
+            for ch in span.content.chars() {
+                if x >= width {
+                    break;
+                }
+                grid[y][x] = SkyCell {
+                    ch,
+                    style: span.style,
+                };
+                x += 1;
+            }
+            if x >= width {
+                break;
+            }
+        }
+    }
+    grid
 }
 
 fn zoomed_sky_lines(
@@ -740,6 +1627,24 @@ fn set_cell_offset(
     set_cell(grid, next_x, next_y, ch, style);
 }
 
+fn set_cell_offset_overlay(
+    grid: &mut [Vec<SkyCell>],
+    x: usize,
+    y: usize,
+    dx: isize,
+    dy: isize,
+    ch: char,
+    style: Style,
+) {
+    let Some(next_x) = x.checked_add_signed(dx) else {
+        return;
+    };
+    let Some(next_y) = y.checked_add_signed(dy) else {
+        return;
+    };
+    set_cell_overlay(grid, next_x, next_y, ch, style);
+}
+
 fn star_style(magnitude: f64, color_index: Option<f64>, palette: Palette) -> Style {
     let color = match color_index {
         Some(ci) if ci < 0.0 => Color::Rgb(190, 220, 255),
@@ -842,6 +1747,62 @@ fn draw_constellation_lines(
             let Some(&(x1, y1)) = points.get(&pair[1]) else {
                 continue;
             };
+            draw_line(grid, x0, y0, x1, y1, line_style, unicode);
+            endpoints.push((x0, y0));
+            endpoints.push((x1, y1));
+        }
+
+        endpoints.sort_unstable();
+        endpoints.dedup();
+        for &(x, y) in &endpoints {
+            set_cell(grid, x, y, if unicode { '○' } else { 'o' }, joint_style);
+        }
+    }
+}
+
+fn draw_backdrop_constellation_lines(
+    grid: &mut [Vec<SkyCell>],
+    visible: &[astro::VisibleStar],
+    app: &App,
+    width: usize,
+    palette: Palette,
+    unicode: bool,
+) {
+    let points = visible
+        .iter()
+        .map(|star| (star.star.hip, (star.x, star.y)))
+        .collect::<HashMap<_, _>>();
+    let selected = app.selected_constellation_code();
+
+    for constellation in &app.constellation_lines {
+        let highlighted =
+            selected.is_some_and(|code| code.eq_ignore_ascii_case(constellation.code));
+        let dimmed = selected.is_some() && !highlighted;
+        let line_color = if highlighted {
+            palette.selected
+        } else if dimmed {
+            palette.dim_line
+        } else {
+            palette.line
+        };
+        let line_style = Style::default().fg(line_color).bg(palette.bg);
+        let joint_style = if highlighted {
+            line_style.add_modifier(Modifier::BOLD)
+        } else {
+            line_style
+        };
+        let mut endpoints = Vec::new();
+
+        for pair in constellation.hips.windows(2) {
+            let Some(&(x0, y0)) = points.get(&pair[0]) else {
+                continue;
+            };
+            let Some(&(x1, y1)) = points.get(&pair[1]) else {
+                continue;
+            };
+            if width > 0 && x0.abs_diff(x1) > width / 2 {
+                continue;
+            }
             draw_line(grid, x0, y0, x1, y1, line_style, unicode);
             endpoints.push((x0, y0));
             endpoints.push((x1, y1));
@@ -1110,6 +2071,38 @@ fn draw_line(
     }
 }
 
+fn draw_line_overlay(
+    grid: &mut [Vec<SkyCell>],
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    style: Style,
+    unicode: bool,
+) {
+    let dx = x1 as isize - x0 as isize;
+    let dy = y1 as isize - y0 as isize;
+    let steps = dx.abs().max(dy.abs()) as usize;
+    if steps == 0 {
+        return;
+    }
+
+    let mut last_x = x0 as isize;
+    let mut last_y = y0 as isize;
+    for step in 1..steps {
+        let t = step as f64 / steps as f64;
+        let x = (x0 as f64 + dx as f64 * t).round() as isize;
+        let y = (y0 as f64 + dy as f64 * t).round() as isize;
+        if x == last_x && y == last_y {
+            continue;
+        }
+        let ch = line_char(x - last_x, y - last_y, unicode);
+        set_cell_overlay(grid, x as usize, y as usize, ch, style);
+        last_x = x;
+        last_y = y;
+    }
+}
+
 fn line_char(dx: isize, dy: isize, unicode: bool) -> char {
     if unicode {
         if dx == 0 {
@@ -1188,6 +2181,19 @@ fn canvas_label_char(ch: char, unicode: bool) -> Option<char> {
 fn set_cell(grid: &mut [Vec<SkyCell>], x: usize, y: usize, ch: char, style: Style) {
     if let Some(row) = grid.get_mut(y) {
         if let Some(cell) = row.get_mut(x) {
+            *cell = SkyCell { ch, style };
+        }
+    }
+}
+
+fn set_cell_overlay(grid: &mut [Vec<SkyCell>], x: usize, y: usize, ch: char, style: Style) {
+    if let Some(row) = grid.get_mut(y) {
+        if let Some(cell) = row.get_mut(x) {
+            let style = if let Some(bg) = cell.style.bg {
+                style.bg(bg)
+            } else {
+                style
+            };
             *cell = SkyCell { ch, style };
         }
     }
@@ -1297,11 +2303,11 @@ fn moon_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
 
 fn sunlight_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
     let language = app.config.language;
-    let light = solar::skylight(&app.config.location, app.now());
-    let events = solar::tonight_events(&app.config.location, app.now());
+    let location = app.active_location();
+    let light = solar::skylight(location, app.now());
+    let events = solar::tonight_events(location, app.now());
     let timezone = app
-        .config
-        .location
+        .active_location()
         .timezone
         .parse::<Tz>()
         .unwrap_or(chrono_tz::UTC);
@@ -1310,12 +2316,8 @@ fn sunlight_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
         Language::Zh => light.name_zh(),
     };
     let sun = solar::sun_position(app.now());
-    let sun_horizontal = astro::horizontal_position(
-        sun.ra_hours,
-        sun.dec_degrees,
-        &app.config.location,
-        app.now(),
-    );
+    let sun_horizontal =
+        astro::horizontal_position(sun.ra_hours, sun.dec_degrees, location, app.now());
     let sunset = events
         .sunset
         .map(|time| time.with_timezone(&timezone).format("%H:%M").to_string())
@@ -1400,7 +2402,7 @@ fn push_star_summary(lines: &mut Vec<Line<'static>>, app: &App, star: crate::cat
     let horizontal = astro::horizontal_position(
         star.ra_hours,
         star.dec_degrees,
-        &app.config.location,
+        app.active_location(),
         app.now(),
     );
     let meta = constellations::meta_for(star.constellation);
@@ -1615,7 +2617,7 @@ fn push_position(
     dec_degrees: f64,
 ) {
     let horizontal =
-        astro::horizontal_position(ra_hours, dec_degrees, &app.config.location, app.now());
+        astro::horizontal_position(ra_hours, dec_degrees, app.active_location(), app.now());
     lines.push(Line::from(label.to_string()));
     lines.push(Line::from(format!(
         "Alt {:+.1}  Az {:.1}",
@@ -1665,7 +2667,7 @@ fn recommendation_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
             astro::horizontal_position(
                 planet.ra_hours,
                 planet.dec_degrees,
-                &app.config.location,
+                app.active_location(),
                 app.now(),
             )
             .altitude
@@ -1684,7 +2686,7 @@ fn recommendation_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
             && astro::horizontal_position(
                 object.ra_hours,
                 object.dec_degrees,
-                &app.config.location,
+                app.active_location(),
                 app.now(),
             )
             .altitude
@@ -1839,7 +2841,7 @@ fn brightest_visible_star(app: &App) -> Option<crate::catalog::Star> {
             astro::horizontal_position(
                 star.ra_hours,
                 star.dec_degrees,
-                &app.config.location,
+                app.active_location(),
                 app.now(),
             )
             .altitude
@@ -2351,7 +3353,8 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_section("导航", palette),
                 help_item("q", "退出", palette),
                 help_item("Esc", "取消选中 / 退出", palette),
-                help_item("←/→", "切换城市", palette),
+                help_item("g", "地球 / 星空翻转", palette),
+                help_item("←/→/↑/↓", "切换城市 / 旋转地球", palette),
                 help_item("Tab", "下个可见星座", palette),
                 help_item("S-Tab", "上个可见星座", palette),
                 help_item("z", "放大星座", palette),
@@ -2391,7 +3394,8 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_section("Navigation", palette),
                 help_item("q", "quit", palette),
                 help_item("Esc", "clear / quit", palette),
-                help_item("←/→", "switch city", palette),
+                help_item("g", "globe / sky flip", palette),
+                help_item("←/→/↑/↓", "city / rotate globe", palette),
                 help_item("Tab", "next constellation", palette),
                 help_item("S-Tab", "previous constellation", palette),
                 help_item("z", "zoom constellation", palette),
@@ -2480,6 +3484,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::TimeZone;
+    use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
@@ -2507,6 +3512,56 @@ mod tests {
             let mut app = app_for_test(false);
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
+    }
+
+    #[test]
+    fn renders_ground_at_common_sizes() {
+        for (width, height) in [(80, 24), (120, 36), (44, 18)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = app_for_test(false);
+            app.config.display.animations = false;
+            app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn renders_horizon_transition_at_common_sizes() {
+        for (width, height) in [(80, 24), (120, 36), (44, 18)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = app_for_test(false);
+            app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn side_panel_is_global_in_ground_and_transition() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.display.side_panel = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(text.contains(i18n::tr(Language::En, "observatory")));
+
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.display.side_panel = true;
+        app.config.display.animations = false;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(text.contains(i18n::tr(Language::En, "observatory")));
+
+        app.config.display.side_panel = false;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(!text.contains(i18n::tr(Language::En, "observatory")));
     }
 
     #[test]
@@ -2570,6 +3625,7 @@ mod tests {
         assert!(i18n::tr(Language::Zh, "footer").contains("c 连线"));
         assert!(i18n::tr(Language::En, "footer_compact").contains("+/- mag"));
         assert!(i18n::tr(Language::En, "footer_compact").contains("c lines"));
+        assert!(i18n::tr(Language::En, "footer_compact").contains("g globe/sky"));
     }
 
     #[test]
@@ -2707,6 +3763,22 @@ mod tests {
     }
 
     #[test]
+    fn earth_texture_has_expected_shape_and_variation() {
+        assert_eq!(
+            EARTH_TEXTURE.len(),
+            EARTH_TEXTURE_WIDTH * EARTH_TEXTURE_HEIGHT * 3
+        );
+        let sahara = earth_texture_color(10.0, 24.0);
+        let pacific = earth_texture_color(-140.0, 0.0);
+        assert!(
+            (sahara.r - pacific.r).abs()
+                + (sahara.g - pacific.g).abs()
+                + (sahara.b - pacific.b).abs()
+                > 40.0
+        );
+    }
+
+    #[test]
     fn renders_themes_and_charsets() {
         for theme in [Theme::Midnight, Theme::Aurora, Theme::Amber, Theme::Mono] {
             for charset in [Charset::Auto, Charset::Ascii, Charset::Unicode] {
@@ -2725,6 +3797,18 @@ mod tests {
         for line in lines {
             for span in &line.spans {
                 text.push_str(span.content.as_ref());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>, width: u16, height: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                text.push_str(buffer[(x, y)].symbol());
             }
             text.push('\n');
         }

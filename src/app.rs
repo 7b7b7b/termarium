@@ -24,6 +24,9 @@ const TIME_SHIFT_HOLD_WINDOW: StdDuration = StdDuration::from_millis(180);
 const TIME_REPEAT_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(160);
 const SETUP_PRESET_FIELD: usize = 0;
 const SETUP_SAVE_FIELD: usize = 1;
+const HORIZON_TRANSITION_DURATION: StdDuration = StdDuration::from_secs(2);
+const GROUND_LAT_STEP: f64 = 2.5;
+const GROUND_LON_STEP: f64 = 5.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -31,6 +34,46 @@ pub enum Screen {
     Setup,
     Search,
     Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Sky,
+    Ground,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroundState {
+    pub cursor_lat: f64,
+    pub cursor_lon: f64,
+    pub preview_location: Location,
+}
+
+impl GroundState {
+    fn from_location(location: &Location) -> Self {
+        let preview_location = Location {
+            name: location.name.clone(),
+            latitude: location.latitude,
+            longitude: normalize_longitude(location.longitude),
+            timezone: location.timezone.clone(),
+        };
+        Self {
+            cursor_lat: preview_location.latitude,
+            cursor_lon: preview_location.longitude,
+            preview_location,
+        }
+    }
+
+    fn from_cursor(latitude: f64, longitude: f64) -> Self {
+        let latitude = latitude.clamp(-89.5, 89.5);
+        let longitude = normalize_longitude(longitude);
+        let preview_location = map_preview_location(latitude, longitude);
+        Self {
+            cursor_lat: latitude,
+            cursor_lon: longitude,
+            preview_location,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -551,6 +594,14 @@ struct SkyTransition {
 }
 
 #[derive(Debug, Clone)]
+struct HorizonTransition {
+    from: ViewMode,
+    to: ViewMode,
+    started: Instant,
+    duration: StdDuration,
+}
+
+#[derive(Debug, Clone)]
 enum SkyTransitionKind {
     City {
         from: Location,
@@ -605,10 +656,13 @@ pub struct App {
     pub constellation_lines: Vec<ConstellationLine>,
     pub deep_sky: Vec<DeepSkyObject>,
     pub screen: Screen,
+    pub view_mode: ViewMode,
     pub setup: SetupState,
     pub settings: SettingsState,
     pub search: SearchState,
     pub pointer: PointerState,
+    pub ground: GroundState,
+    pub session_location: Option<Location>,
     pub selected_target: Option<Target>,
     pub constellation_zoom: bool,
     pub constellation_zoom_code: Option<String>,
@@ -627,6 +681,7 @@ pub struct App {
     last_pointer_move: Option<(KeyCode, Instant)>,
     last_time_shift: Option<(KeyCode, Instant)>,
     sky_transition: Option<SkyTransition>,
+    horizon_transition: Option<HorizonTransition>,
 }
 
 impl App {
@@ -639,6 +694,7 @@ impl App {
         time_override: Option<DateTime<Utc>>,
     ) -> Self {
         let setup = SetupState::from_location(&config.location);
+        let ground = GroundState::from_location(&config.location);
         let time_base = time_override.unwrap_or_else(Utc::now);
         Self {
             config,
@@ -651,10 +707,13 @@ impl App {
             } else {
                 Screen::Sky
             },
+            view_mode: ViewMode::Sky,
             setup,
             settings: SettingsState::default(),
             search: SearchState::default(),
             pointer: PointerState::default(),
+            ground,
+            session_location: None,
             selected_target: None,
             constellation_zoom: false,
             constellation_zoom_code: None,
@@ -673,6 +732,7 @@ impl App {
             last_pointer_move: None,
             last_time_shift: None,
             sky_transition: None,
+            horizon_transition: None,
         }
     }
 
@@ -712,6 +772,13 @@ impl App {
                 self.update_pointer_hover();
             }
         }
+        if self
+            .horizon_transition
+            .as_ref()
+            .is_some_and(|transition| transition.is_finished())
+        {
+            self.horizon_transition = None;
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> io::Result<()> {
@@ -744,6 +811,10 @@ impl App {
     }
 
     fn handle_sky_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        if self.view_mode == ViewMode::Ground {
+            return self.handle_ground_key(key);
+        }
+
         if self.pointer.active {
             match key.code {
                 KeyCode::Esc => {
@@ -801,9 +872,7 @@ impl App {
                 }
             }
             KeyCode::Char('s') => {
-                self.setup = SetupState::from_location(&self.config.location);
-                self.screen = Screen::Setup;
-                self.message.clear();
+                self.open_setup_from(self.active_location().clone());
             }
             KeyCode::Char('/') => {
                 self.search = SearchState::default();
@@ -866,11 +935,52 @@ impl App {
             }
             KeyCode::Char('x') => self.toggle_pointer(),
             KeyCode::Char('z') => self.toggle_constellation_zoom(),
+            KeyCode::Char('g') => self.toggle_ground_sky(),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.adjust_magnitude(0.1)?;
             }
             KeyCode::Char('-') => {
                 self.adjust_magnitude(-0.1)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_ground_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        match key.code {
+            KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
+            KeyCode::Char('g') => self.toggle_ground_sky(),
+            KeyCode::Char('s') => self.open_setup_from(self.ground.preview_location.clone()),
+            KeyCode::Left => self.move_ground_cursor(-GROUND_LON_STEP, 0.0),
+            KeyCode::Right => self.move_ground_cursor(GROUND_LON_STEP, 0.0),
+            KeyCode::Up => self.move_ground_cursor(0.0, GROUND_LAT_STEP),
+            KeyCode::Down => self.move_ground_cursor(0.0, -GROUND_LAT_STEP),
+            KeyCode::Char(' ') => self.toggle_pause(),
+            KeyCode::Char('[') => self.shift_hour_time(key, Duration::hours(-1)),
+            KeyCode::Char(']') => self.shift_hour_time(key, Duration::hours(1)),
+            KeyCode::Char('{') => self.shift_day_time(key, Duration::days(-1)),
+            KeyCode::Char('}') => self.shift_day_time(key, Duration::days(1)),
+            KeyCode::Char('r') => self.reset_time(),
+            KeyCode::Char('o') => {
+                self.screen = Screen::Settings;
+                self.message.clear();
+            }
+            KeyCode::Char('t') => {
+                self.config.language = self.config.language.toggle();
+                self.save()?;
+            }
+            KeyCode::Char('T') => {
+                self.config.display.theme = self.config.display.theme.next();
+                self.save()?;
+            }
+            KeyCode::Char('a') => {
+                self.config.display.animations = !self.config.display.animations;
+                self.save()?;
+            }
+            KeyCode::Char('u') => {
+                self.config.display.charset = self.config.display.charset.next();
+                self.save()?;
             }
             _ => {}
         }
@@ -1013,6 +1123,12 @@ impl App {
         self.setup.field = field;
     }
 
+    fn open_setup_from(&mut self, location: Location) {
+        self.setup = SetupState::from_location(&location);
+        self.screen = Screen::Setup;
+        self.message.clear();
+    }
+
     fn cycle_preset(&mut self, forward: bool) {
         let matches = self.setup_preset_matches();
         if matches.is_empty() {
@@ -1110,6 +1226,10 @@ impl App {
 
         self.save()?;
         self.start_city_transition(from_location, to_location);
+        self.session_location = None;
+        self.ground = GroundState::from_location(&self.config.location);
+        self.view_mode = ViewMode::Sky;
+        self.horizon_transition = None;
         self.can_cancel_setup = true;
         self.screen = Screen::Sky;
         self.message = i18n::tr(self.config.language, "saved").to_string();
@@ -1161,6 +1281,8 @@ impl App {
             );
         }
         self.config.location = to_location;
+        self.session_location = None;
+        self.ground = GroundState::from_location(&self.config.location);
         self.setup = SetupState::from_location(&self.config.location);
         if persist { self.save() } else { Ok(()) }
     }
@@ -1231,9 +1353,12 @@ impl App {
         if let Some(origin) = self.tour_origin.take() {
             self.start_city_transition(self.config.location.clone(), origin.clone());
             self.config.location = origin;
+            self.session_location = None;
+            self.ground = GroundState::from_location(&self.config.location);
             self.setup = SetupState::from_location(&self.config.location);
             self.message = i18n::tr(self.config.language, "tour_off").to_string();
         } else {
+            self.session_location = None;
             self.tour_origin = Some(self.config.location.clone());
             self.last_tour_switch = Instant::now() - StdDuration::from_secs(4);
             self.advance_tour_city();
@@ -1372,6 +1497,15 @@ impl App {
         }
     }
 
+    pub fn active_location(&self) -> &Location {
+        if self.view_mode == ViewMode::Ground {
+            return &self.ground.preview_location;
+        }
+        self.session_location
+            .as_ref()
+            .unwrap_or(&self.config.location)
+    }
+
     pub fn render_location(&self) -> Location {
         if let Some(transition) = &self.sky_transition {
             match &transition.kind {
@@ -1382,7 +1516,7 @@ impl App {
                 _ => {}
             }
         }
-        self.config.location.clone()
+        self.active_location().clone()
     }
 
     pub fn zoom_transition(&self) -> Option<(&str, &str, f64)> {
@@ -1428,6 +1562,12 @@ impl App {
             )
     }
 
+    pub fn horizon_transition(&self) -> Option<(ViewMode, ViewMode, f64)> {
+        self.horizon_transition
+            .as_ref()
+            .map(|transition| (transition.from, transition.to, transition.eased_progress()))
+    }
+
     pub fn star_by_hip(&self, hip: u32) -> Option<Star> {
         self.catalog
             .stars
@@ -1467,7 +1607,7 @@ impl App {
     }
 
     pub fn constellation_visible(&self, code: &str) -> bool {
-        self.constellation_visible_at(code, &self.config.location)
+        self.constellation_visible_at(code, self.active_location())
     }
 
     fn constellation_visible_at(&self, code: &str, location: &Location) -> bool {
@@ -1539,6 +1679,50 @@ impl App {
             self.pointer.hits.clear();
             self.message = i18n::tr(self.config.language, "pointer_off").to_string();
         }
+    }
+
+    fn toggle_ground_sky(&mut self) {
+        let from = self.view_mode;
+        match self.view_mode {
+            ViewMode::Sky => {
+                self.pointer.active = false;
+                self.last_pointer_move = None;
+                self.ground = GroundState::from_location(self.active_location());
+                self.view_mode = ViewMode::Ground;
+                self.message = i18n::tr(self.config.language, "ground_mode").to_string();
+            }
+            ViewMode::Ground => {
+                self.session_location = Some(self.ground.preview_location.clone());
+                self.constellation_zoom = false;
+                self.constellation_zoom_code = None;
+                self.sky_transition = None;
+                self.view_mode = ViewMode::Sky;
+                self.message = i18n::tr(self.config.language, "sky_mode").to_string();
+            }
+        }
+
+        if self.config.display.animations {
+            self.horizon_transition = Some(HorizonTransition {
+                from,
+                to: self.view_mode,
+                started: Instant::now(),
+                duration: HORIZON_TRANSITION_DURATION,
+            });
+        } else {
+            self.horizon_transition = None;
+        }
+    }
+
+    fn move_ground_cursor(&mut self, delta_lon: f64, delta_lat: f64) {
+        let next_lat = (self.ground.cursor_lat + delta_lat).clamp(-89.5, 89.5);
+        let next_lon = normalize_longitude(self.ground.cursor_lon + delta_lon);
+        self.ground = GroundState::from_cursor(next_lat, next_lon);
+        self.message = format!(
+            "{} {:+.1} {:+.1}",
+            i18n::tr(self.config.language, "ground_cursor"),
+            self.ground.cursor_lat,
+            self.ground.cursor_lon
+        );
     }
 
     fn pointer_move_step(&mut self, key: KeyEvent) -> isize {
@@ -1685,11 +1869,12 @@ impl App {
         }
 
         if let Some(code) = self.selected_constellation_code().map(ToString::to_string) {
-            if !self.constellation_visible_at(&code, &self.config.location) {
+            if !self.constellation_visible_at(&code, self.active_location()) {
                 self.constellation_zoom = false;
                 self.constellation_zoom_code = None;
                 self.config.display.side_panel = true;
-                self.message = self.constellation_not_visible_message(&code, &self.config.location);
+                self.message =
+                    self.constellation_not_visible_message(&code, self.active_location());
                 return;
             }
             let meta = constellations::meta_for(&code);
@@ -2022,7 +2207,7 @@ impl App {
     }
 
     fn line_endpoint_visible(&self, hip: u32, time: DateTime<Utc>) -> bool {
-        self.line_endpoint_visible_at(hip, &self.config.location, time)
+        self.line_endpoint_visible_at(hip, self.active_location(), time)
     }
 
     fn line_endpoint_visible_at(&self, hip: u32, location: &Location, time: DateTime<Utc>) -> bool {
@@ -2165,6 +2350,23 @@ impl SkyTransition {
     }
 }
 
+impl HorizonTransition {
+    fn progress(&self) -> f64 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (self.started.elapsed().as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0)
+    }
+
+    fn eased_progress(&self) -> f64 {
+        smoothstep(self.progress())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.progress() >= 1.0
+    }
+}
+
 fn map_zoomed_visible(
     visible: Vec<astro::VisibleStar>,
     mapper: SkyViewMapper,
@@ -2213,6 +2415,24 @@ fn lerp_time(from: DateTime<Utc>, to: DateTime<Utc>, progress: f64) -> DateTime<
     let to_millis = to.timestamp_millis() as f64;
     let millis = lerp(from_millis, to_millis, t).round() as i64;
     DateTime::from_timestamp_millis(millis).unwrap_or(to)
+}
+
+fn map_preview_location(latitude: f64, longitude: f64) -> Location {
+    Location {
+        name: format!("Globe {latitude:+.1} {longitude:+.1}"),
+        latitude,
+        longitude,
+        timezone: approximate_timezone(longitude),
+    }
+}
+
+fn approximate_timezone(longitude: f64) -> String {
+    let offset = (longitude / 15.0).round().clamp(-12.0, 12.0) as i32;
+    match offset.cmp(&0) {
+        std::cmp::Ordering::Equal => "UTC".to_string(),
+        std::cmp::Ordering::Greater => format!("Etc/GMT-{offset}"),
+        std::cmp::Ordering::Less => format!("Etc/GMT+{}", offset.abs()),
+    }
 }
 
 fn normalize_longitude(value: f64) -> f64 {
@@ -2364,6 +2584,80 @@ mod tests {
         app.cycle_city(false).unwrap();
         let last_city = PRESETS.iter().rev().find(|preset| !preset.custom).unwrap();
         assert_eq!(app.config.location.name, last_city.en);
+    }
+
+    #[test]
+    fn starts_in_sky_view() {
+        let app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        assert_eq!(app.view_mode, ViewMode::Sky);
+        assert!(app.horizon_transition().is_none());
+    }
+
+    #[test]
+    fn ground_toggle_starts_and_finishes_horizon_transition() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert!(matches!(
+            app.horizon_transition(),
+            Some((ViewMode::Sky, ViewMode::Ground, _))
+        ));
+        if let Some(transition) = app.horizon_transition.as_mut() {
+            transition.started = Instant::now() - HORIZON_TRANSITION_DURATION;
+        }
+        app.tick();
+        assert!(app.horizon_transition().is_none());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        assert_eq!(app.view_mode, ViewMode::Sky);
+        assert!(matches!(
+            app.horizon_transition(),
+            Some((ViewMode::Ground, ViewMode::Sky, _))
+        ));
+    }
+
+    #[test]
+    fn ground_arrows_move_preview_without_saving_config_location() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Right)).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Up)).unwrap();
+        assert_eq!(app.config.location.name, "Shanghai");
+        assert_eq!(app.config.location.timezone, "Asia/Shanghai");
+        assert_ne!(
+            app.ground.preview_location.longitude,
+            app.config.location.longitude
+        );
+        assert_ne!(
+            app.ground.preview_location.latitude,
+            app.config.location.latitude
+        );
+    }
+
+    #[test]
+    fn map_preview_timezones_parse() {
+        for longitude in [-179.0, -75.0, 0.0, 121.0, 179.0] {
+            let timezone = approximate_timezone(longitude);
+            assert!(
+                timezone.parse::<chrono_tz::Tz>().is_ok(),
+                "{timezone} should parse"
+            );
+        }
     }
 
     #[test]
@@ -3059,6 +3353,8 @@ mod tests {
         });
         app.set_pointer_canvas(80, 24);
         app.pointer.active = true;
+        app.config.display.planets = false;
+        app.config.display.deep_sky = false;
         app.selected_target = Some(Target::Star(91262));
         app.update_pointer_hover();
         assert_eq!(app.pointer.hovered, None);

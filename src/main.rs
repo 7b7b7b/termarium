@@ -9,6 +9,7 @@ mod planets;
 mod solar;
 mod star_aliases;
 mod ui;
+mod world_map;
 
 use std::{collections::BTreeSet, error::Error};
 
@@ -83,6 +84,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let catalog = Catalog::load();
             let constellation_lines = constellations::load();
             let deep_sky = deep_sky::load();
+            let world_lines = world_map::load();
+            let world_land = world_map::load_land();
             let named = catalog
                 .stars
                 .iter()
@@ -103,6 +106,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("line license: CC BY 4.0");
             println!("deep-sky source: OpenNGC v20260501");
             println!("deep-sky license: CC BY-SA 4.0");
+            println!("world map source: Natural Earth 1:110m coastline and land");
+            println!("earth texture source: NASA Blue Marble Next Generation July 2004");
+            println!("world map license: public domain");
             println!("stars: {}", catalog.stars.len());
             println!("named stars: {named}");
             println!("curated star aliases: {}", star_aliases::STAR_ALIASES.len());
@@ -117,6 +123,22 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .sum::<usize>()
             );
             println!("deep-sky objects: {}", deep_sky.len());
+            println!("world map lines: {}", world_lines.len());
+            println!(
+                "world map points: {}",
+                world_lines
+                    .iter()
+                    .map(|line| line.points.len())
+                    .sum::<usize>()
+            );
+            println!("world land rings: {}", world_land.len());
+            println!(
+                "world land points: {}",
+                world_land
+                    .iter()
+                    .map(|line| line.points.len())
+                    .sum::<usize>()
+            );
             println!("limiting magnitude: <= 6.0");
             return Ok(());
         }

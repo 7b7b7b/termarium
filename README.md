@@ -2,8 +2,8 @@
 
 Termarium is a quiet terminal planetarium. It opens as a full-screen TUI,
 asks for your observing location the first time, then renders a real bright-star
-sky map with constellations, planets, Messier objects, time travel, and a moon
-phase panel.
+sky map with constellations, planets, Messier objects, time travel, a moon phase
+panel, and an offline globe that flips into the sky from the horizon.
 
 ```bash
 cargo install termarium
@@ -28,6 +28,7 @@ Linux x64, and Windows x64.
 - Offline Messier deep-sky catalog derived from OpenNGC v20260501
 - Time travel, city tour, alias-aware target search, constellation highlight, and tonight panel
 - Crosshair pointer mode for selecting visible stars directly from the sky map
+- Globe view with offline Natural Earth coastlines/land, raster terrain colors, rotating preview, and horizon flip animation
 - Offline low-precision Venus, Mars, Jupiter, and Saturn positions
 - Sun altitude, daylight/twilight state, sunset, and next sunrise
 - First-run location setup with city presets, custom coordinates, and timezone
@@ -62,6 +63,7 @@ r       return to live sky
 /       search targets
 s       setup location; type on the preset row to search city presets
 x       pointer mode; arrows move the crosshair, hover selects a star
+g       flip between sky and globe
 Tab     next visible constellation
 S-Tab   previous visible constellation
 h       toggle tonight panel
@@ -69,6 +71,10 @@ o       settings panel
 v       city tour
 ?       detailed help
 ```
+
+In the globe view, arrow keys rotate to a temporary observing point. The preview is
+used when you flip back to the sky, but it is not saved unless you open setup
+from that preview and confirm it.
 
 Quick toggles still work, but they are also available in the settings panel:
 
@@ -101,8 +107,11 @@ subset derived from the HYG Database v4.2 and remains under CC BY-SA 4.0. The
 constellation-line catalog is derived from Marc van der Sluys'
 ConstellationLines data and remains under CC BY 4.0. The deep-sky catalog is
 derived from OpenNGC v20260501 and remains under CC BY-SA 4.0. See `NOTICE` for
-attribution. Planet and solar calculations are local approximate algorithms
-based on NASA/JPL and NOAA public reference formulas.
+attribution. The bundled world coastline and land data is derived from Natural
+Earth 1:110m public domain vector data, and the bundled globe color texture is
+downsampled from NASA Blue Marble Next Generation July 2004 topography and
+bathymetry imagery. Planet and solar calculations are local approximate
+algorithms based on NASA/JPL and NOAA public reference formulas.
 
 ## Development
 

@@ -42,6 +42,22 @@ International (CC BY-SA 4.0). Termarium keeps Messier objects, converts RA/Dec
 to decimal hours/degrees, and adds manually curated entries for M40, M45, and
 M102 where the OpenNGC Messier field is intentionally absent or ambiguous.
 
+Termarium includes compact world coastline and land data derived from Natural
+Earth 1:110m coastline and land vectors.
+
+Termarium includes a compact Earth color texture downsampled from NASA Blue
+Marble Next Generation July 2004 topography and bathymetry imagery.
+
+Source:
+https://www.naturalearthdata.com/
+https://github.com/nvkelso/natural-earth-vector
+
+Natural Earth vector and raster map data is public domain. Termarium stores
+reduced offline line and land datasets for the globe map. Made with Natural
+Earth.
+
+NASA Blue Marble imagery is courtesy of NASA Earth Observatory.
+
 Termarium's offline planet positions use low-precision orbital elements and
 methods from NASA/JPL Approximate Positions of the Planets:
 https://ssd.jpl.nasa.gov/planets/approx_pos.html
