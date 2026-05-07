@@ -23,7 +23,7 @@ use ratatui::{
 use crate::{
     app::{self, App, Screen, Target},
     astro,
-    config::{Language, Theme},
+    config::{Language, Location, Theme},
     constellations, i18n, planets, solar, star_aliases,
 };
 
@@ -71,7 +71,7 @@ fn app_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> io::Result<()> {
-    let tick = StdDuration::from_millis(250);
+    let tick = StdDuration::from_millis(33);
     let mut last_draw = Instant::now();
 
     while !app.should_quit {
@@ -270,45 +270,85 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
 
 fn draw_star_canvas(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
     let language = app.config.language;
-    let block = Block::default()
-        .title(format!(" {} ", i18n::tr(language, "sky")))
-        .title_style(
-            Style::default()
-                .fg(palette.cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.dim_line))
-        .style(Style::default().bg(palette.bg));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let base_block = Block::default().borders(Borders::ALL);
+    let inner = base_block.inner(area);
 
     if inner.width == 0 || inner.height == 0 {
+        frame.render_widget(
+            base_block
+                .title(sky_title_line(language, palette))
+                .border_style(Style::default().fg(palette.dim_line))
+                .style(Style::default().bg(palette.bg)),
+            area,
+        );
         return;
     }
-    app.set_pointer_canvas(inner.width as usize, inner.height as usize);
 
+    let sky_location = app.render_location();
     let visible = astro::visible_stars(
         &app.catalog.stars,
-        &app.config.location,
+        &sky_location,
         app.now(),
         app.config.display.limiting_magnitude,
         inner.width as usize,
         inner.height as usize,
     );
-    let lines = sky_lines(
-        app,
-        &visible,
-        inner.width as usize,
-        inner.height as usize,
-        palette,
-    );
-    frame.render_widget(Paragraph::new(lines), inner);
+    let stat_title = sky_stat_title(app, language, visible.len(), palette);
+    let block = base_block
+        .title(sky_title_line(language, palette))
+        .title_top(stat_title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.dim_line))
+        .style(Style::default().bg(palette.bg));
+    frame.render_widget(block, area);
 
-    let stat = format!(
-        " {} {} {}  ·  {} {:.1}  ·  {} {}  ·  {} {} ",
+    app.set_pointer_canvas(inner.width as usize, inner.height as usize);
+
+    let lines = if app.should_render_zoomed_sky() && app.zoom_render_code().is_some() {
+        zoomed_sky_lines(app, inner.width as usize, inner.height as usize, palette).unwrap_or_else(
+            || {
+                sky_lines(
+                    app,
+                    &visible,
+                    &sky_location,
+                    inner.width as usize,
+                    inner.height as usize,
+                    palette,
+                )
+            },
+        )
+    } else {
+        sky_lines(
+            app,
+            &visible,
+            &sky_location,
+            inner.width as usize,
+            inner.height as usize,
+            palette,
+        )
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn sky_title_line(language: Language, palette: Palette) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {} ", i18n::tr(language, "sky")),
+        Style::default()
+            .fg(palette.cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn sky_stat_title(
+    app: &App,
+    language: Language,
+    visible_count: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let mut stat = format!(
+        " {} {} {} · {} {:.1} · {} {} · {} {} ",
         i18n::tr(language, "visible"),
-        visible.len(),
+        visible_count,
         i18n::tr(language, "stars"),
         i18n::tr(language, "limit"),
         app.config.display.limiting_magnitude,
@@ -317,21 +357,169 @@ fn draw_star_canvas(frame: &mut Frame, app: &mut App, area: Rect, palette: Palet
         i18n::tr(language, "theme"),
         format!("{:?}", app.config.display.theme).to_lowercase()
     );
-    let stat_area = Rect {
-        x: inner.x.saturating_add(1),
-        y: inner.y,
-        width: stat.chars().count().min(inner.width as usize) as u16,
-        height: 1,
+    if app.constellation_zoom {
+        if let Some(code) = app.selected_constellation_code() {
+            stat.push_str(&format!(
+                " · {} {} · Tab ",
+                i18n::tr(language, "constellation_zoom"),
+                code
+            ));
+        }
+    }
+    Line::from(Span::styled(
+        stat,
+        Style::default().fg(palette.muted).bg(palette.bg),
+    ))
+    .right_aligned()
+}
+
+fn zoomed_sky_lines(
+    app: &App,
+    width: usize,
+    height: usize,
+    palette: Palette,
+) -> Option<Vec<Line<'static>>> {
+    let code = app.zoom_render_code()?;
+    let view = app.zoom_render_view(width, height)?;
+    let visible = &view.stars;
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default().fg(palette.muted).bg(palette.bg),
     };
-    frame.render_widget(
-        Paragraph::new(stat).style(Style::default().fg(palette.muted).bg(palette.bg)),
-        stat_area,
+    let mut grid = vec![vec![empty; width]; height];
+    let unicode = app.config.display.charset.canvas_unicode();
+    let location = app.render_location();
+    let time = app.now();
+    let horizon_style = Style::default().fg(palette.dim_line).bg(palette.bg);
+
+    for azimuth in (0..360).step_by(2) {
+        if let Some((x, y)) = view.project_horizontal(0.0, azimuth as f64) {
+            set_cell(&mut grid, x, y, '.', horizon_style);
+        }
+    }
+
+    if let Some((x, y)) = view.project_horizontal(90.0, 0.0) {
+        set_cell(
+            &mut grid,
+            x,
+            y,
+            '+',
+            Style::default().fg(palette.dim_line).bg(palette.bg),
+        );
+    }
+
+    for star in visible.iter().rev() {
+        let in_constellation = star.star.constellation.eq_ignore_ascii_case(code);
+        let selected =
+            matches!(app.selected_target, Some(Target::Star(hip)) if hip == star.star.hip);
+        let symbol = if selected {
+            selected_symbol(unicode)
+        } else {
+            star_symbol(star.star.magnitude, unicode, app.animation_tick)
+        };
+        let mut style = star_style(star.star.magnitude, star.star.color_index, palette);
+        if selected {
+            style = Style::default()
+                .fg(palette.selected)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD);
+        } else if in_constellation {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        set_cell(&mut grid, star.x, star.y, symbol, style);
+    }
+
+    if app.config.display.constellations {
+        draw_constellation_lines(&mut grid, visible, app, width, height, palette, unicode);
+    }
+
+    draw_deep_sky(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+        },
+        palette,
+        unicode,
     );
+    draw_planets(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+        },
+        palette,
+        unicode,
+    );
+
+    label_cardinal_projected(&mut grid, 0.0, 'N', palette, |altitude, azimuth| {
+        view.project_horizontal(altitude, azimuth)
+    });
+    label_cardinal_projected(&mut grid, 90.0, 'E', palette, |altitude, azimuth| {
+        view.project_horizontal(altitude, azimuth)
+    });
+    label_cardinal_projected(&mut grid, 180.0, 'S', palette, |altitude, azimuth| {
+        view.project_horizontal(altitude, azimuth)
+    });
+    label_cardinal_projected(&mut grid, 270.0, 'W', palette, |altitude, azimuth| {
+        view.project_horizontal(altitude, azimuth)
+    });
+
+    if app.config.display.labels {
+        let label_limit = if app.constellation_zoom { 4.0 } else { 1.65 };
+        let label_count = if app.constellation_zoom { 16 } else { 9 };
+        for star in visible
+            .iter()
+            .filter(|star| !star.star.proper.is_empty() && star.star.magnitude <= label_limit)
+            .take(label_count)
+        {
+            draw_label(
+                &mut grid,
+                star.x,
+                star.y,
+                star.star.proper,
+                palette,
+                unicode,
+            );
+        }
+    }
+
+    if !app.pointer.active {
+        draw_selected_label(
+            &mut grid,
+            app,
+            |ra, dec| {
+                let horizontal = astro::horizontal_position(ra, dec, &location, time);
+                view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+            },
+            palette,
+            unicode,
+        );
+    }
+
+    let meta = constellations::meta_for(code);
+    draw_text(
+        &mut grid,
+        1,
+        0,
+        &format!("{} · {}", meta.code, meta.en),
+        Style::default()
+            .fg(palette.selected)
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD),
+        unicode,
+    );
+
+    draw_pointer(&mut grid, app, palette, unicode);
+    Some(grid_to_lines(grid))
 }
 
 fn sky_lines(
     app: &App,
     visible: &[astro::VisibleStar],
+    location: &Location,
     width: usize,
     height: usize,
     palette: Palette,
@@ -383,8 +571,27 @@ fn sky_lines(
         draw_constellation_lines(&mut grid, visible, app, width, height, palette, unicode);
     }
 
-    draw_deep_sky(&mut grid, app, width, height, palette, unicode);
-    draw_planets(&mut grid, app, width, height, palette, unicode);
+    let time = app.now();
+    draw_deep_sky(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, location, time);
+            astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+        },
+        palette,
+        unicode,
+    );
+    draw_planets(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, location, time);
+            astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+        },
+        palette,
+        unicode,
+    );
 
     label_cardinal(&mut grid, width, height, 0.0, 'N', palette);
     label_cardinal(&mut grid, width, height, 90.0, 'E', palette);
@@ -409,25 +616,26 @@ fn sky_lines(
     }
 
     if !app.pointer.active {
-        draw_selected_label(&mut grid, app, width, height, palette, unicode);
+        draw_selected_label(
+            &mut grid,
+            app,
+            |ra, dec| {
+                let horizontal = astro::horizontal_position(ra, dec, location, time);
+                astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+            },
+            palette,
+            unicode,
+        );
     }
     draw_pointer(&mut grid, app, palette, unicode);
 
-    grid.into_iter()
-        .map(|row| {
-            Line::from(
-                row.into_iter()
-                    .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect()
+    grid_to_lines(grid)
 }
 
 fn star_symbol(magnitude: f64, unicode: bool, tick: u64) -> char {
     if unicode {
         if magnitude <= 0.0 {
-            if tick % 8 < 4 { '✦' } else { '✧' }
+            if tick % 60 < 30 { '✦' } else { '✧' }
         } else if magnitude <= 1.4 {
             '✶'
         } else if magnitude <= 2.7 {
@@ -540,6 +748,29 @@ fn label_cardinal(
     }
 }
 
+fn label_cardinal_projected<F>(
+    grid: &mut [Vec<SkyCell>],
+    azimuth: f64,
+    label: char,
+    palette: Palette,
+    mut project: F,
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
+    if let Some((x, y)) = project(0.0, azimuth) {
+        set_cell(
+            grid,
+            x,
+            y,
+            label,
+            Style::default()
+                .fg(palette.cyan)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+}
+
 fn draw_constellation_lines(
     grid: &mut [Vec<SkyCell>],
     visible: &[astro::VisibleStar],
@@ -619,14 +850,15 @@ fn draw_constellation_lines(
     }
 }
 
-fn draw_deep_sky(
+fn draw_deep_sky<F>(
     grid: &mut [Vec<SkyCell>],
     app: &App,
-    width: usize,
-    height: usize,
+    mut project: F,
     palette: Palette,
     unicode: bool,
-) {
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
     if !app.config.display.deep_sky {
         return;
     }
@@ -634,15 +866,7 @@ fn draw_deep_sky(
         if object.magnitude.unwrap_or(99.0) > 9.5 {
             continue;
         }
-        let horizontal = astro::horizontal_position(
-            object.ra_hours,
-            object.dec_degrees,
-            &app.config.location,
-            app.now(),
-        );
-        let Some((x, y)) =
-            astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
-        else {
+        let Some((x, y)) = project(object.ra_hours, object.dec_degrees) else {
             continue;
         };
         let selected =
@@ -674,27 +898,20 @@ fn draw_deep_sky(
     }
 }
 
-fn draw_planets(
+fn draw_planets<F>(
     grid: &mut [Vec<SkyCell>],
     app: &App,
-    width: usize,
-    height: usize,
+    mut project: F,
     palette: Palette,
     unicode: bool,
-) {
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
     if !app.config.display.planets {
         return;
     }
     for planet in planets::visible_planets(app.now()) {
-        let horizontal = astro::horizontal_position(
-            planet.ra_hours,
-            planet.dec_degrees,
-            &app.config.location,
-            app.now(),
-        );
-        let Some((x, y)) =
-            astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
-        else {
+        let Some((x, y)) = project(planet.ra_hours, planet.dec_degrees) else {
             continue;
         };
         let selected =
@@ -730,20 +947,19 @@ fn draw_planets(
     }
 }
 
-fn draw_selected_label(
+fn draw_selected_label<F>(
     grid: &mut [Vec<SkyCell>],
     app: &App,
-    width: usize,
-    height: usize,
+    mut project: F,
     palette: Palette,
     unicode: bool,
-) {
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
     let Some((label, ra, dec)) = selected_coordinates(app) else {
         return;
     };
-    let horizontal = astro::horizontal_position(ra, dec, &app.config.location, app.now());
-    let Some((x, y)) = astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
-    else {
+    let Some((x, y)) = project(ra, dec) else {
         return;
     };
     draw_text(
@@ -891,6 +1107,18 @@ fn set_cell(grid: &mut [Vec<SkyCell>], x: usize, y: usize, ch: char, style: Styl
             *cell = SkyCell { ch, style };
         }
     }
+}
+
+fn grid_to_lines(grid: Vec<Vec<SkyCell>>) -> Vec<Line<'static>> {
+    grid.into_iter()
+        .map(|row| {
+            Line::from(
+                row.into_iter()
+                    .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect()
 }
 
 fn draw_side_panel(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
@@ -1153,10 +1381,26 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
             let meta = constellations::meta_for(code);
             lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
             lines.push(Line::from(meta.zh.to_string()));
-            let visible_codes = app.visible_constellation_codes();
-            let visible = visible_codes
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(code));
+            let visible = app.constellation_visible(code);
+            if !visible {
+                lines.push(Line::from(Span::styled(
+                    i18n::tr(language, "constellation_not_visible_here"),
+                    Style::default()
+                        .fg(palette.warm)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(i18n::tr(language, "constellation_pulled_back")));
+            }
+            lines.push(Line::from(Span::styled(
+                if !visible {
+                    i18n::tr(language, "constellation_hidden_hint")
+                } else if app.constellation_zoom {
+                    i18n::tr(language, "constellation_zoom_exit_hint")
+                } else {
+                    i18n::tr(language, "constellation_zoom_hint")
+                },
+                Style::default().fg(palette.warm),
+            )));
             lines.push(Line::from(format!(
                 "{}: {}",
                 i18n::tr(language, "visible_state"),
@@ -1901,6 +2145,7 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("←/→", "切换城市", palette),
                 help_item("Tab", "下个可见星座", palette),
                 help_item("S-Tab", "上个可见星座", palette),
+                help_item("z", "放大星座", palette),
                 help_item("/", "搜索天体", palette),
                 help_item("s", "设置位置", palette),
                 help_item("o", "设置面板", palette),
@@ -1940,6 +2185,7 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("←/→", "switch city", palette),
                 help_item("Tab", "next constellation", palette),
                 help_item("S-Tab", "previous constellation", palette),
+                help_item("z", "zoom constellation", palette),
                 help_item("/", "search object", palette),
                 help_item("s", "setup location", palette),
                 help_item("o", "settings panel", palette),
@@ -2055,6 +2301,36 @@ mod tests {
     }
 
     #[test]
+    fn renders_constellation_zoom_screen() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        let code = app.visible_constellation_codes().first().cloned().unwrap();
+        app.selected_target = Some(Target::Constellation(code));
+        app.constellation_zoom = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn sky_status_stays_out_of_canvas_area() {
+        let backend = TestBackend::new(84, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        let test_palette = palette(Theme::Midnight);
+        terminal
+            .draw(|frame| {
+                draw_star_canvas(frame, &mut app, Rect::new(0, 0, 84, 16), test_palette);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let top = (0..84).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+        let first_canvas_row = (0..84).map(|x| buffer[(x, 1)].symbol()).collect::<String>();
+        assert!(top.contains("Visible"));
+        assert!(!first_canvas_row.contains("Visible"));
+        assert!(!first_canvas_row.contains("limit"));
+    }
+
+    #[test]
     fn renders_setup_and_search_screen() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2106,6 +2382,7 @@ mod tests {
                 "{expected} missing from help"
             );
         }
+        assert!(compact_help.contains("z放大星座"));
     }
 
     #[test]
@@ -2179,6 +2456,34 @@ mod tests {
         app.selected_target = Some(Target::Star(8102));
         let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
         assert!(text.contains("天仓五 / Tau Ceti"));
+    }
+
+    #[test]
+    fn constellation_target_lines_hint_zoom_key() {
+        let mut app = app_for_test(false);
+        app.config.language = Language::Zh;
+        let code = app.visible_constellation_codes().first().cloned().unwrap();
+        app.selected_target = Some(Target::Constellation(code));
+        let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
+        assert!(text.contains("z 放大"));
+        app.constellation_zoom = true;
+        let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
+        assert!(text.contains("z/Esc 退出放大"));
+    }
+
+    #[test]
+    fn constellation_target_lines_explain_hidden_target() {
+        let mut app = app_for_test(false);
+        app.config.language = Language::Zh;
+        let hidden = constellations::CONSTELLATION_META
+            .iter()
+            .find(|meta| !app.constellation_visible(meta.code))
+            .unwrap();
+        app.selected_target = Some(Target::Constellation(hidden.code.to_string()));
+        let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
+        assert!(text.contains("当前城市此刻不可见"));
+        assert!(text.contains("已拉回全局天空"));
+        assert!(text.contains("Tab 可切换到可见星座"));
     }
 
     #[test]

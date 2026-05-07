@@ -48,6 +48,14 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "planet") => "Planet",
         (Language::En, "deep_sky") => "Deep sky",
         (Language::En, "constellation") => "Constellation",
+        (Language::En, "constellation_zoom") => "Zoom",
+        (Language::En, "constellation_zoom_hint") => "z zoom · Tab next while zoomed",
+        (Language::En, "constellation_zoom_exit_hint") => "z/Esc exit zoom · Tab next",
+        (Language::En, "constellation_zoom_on") => "zoomed",
+        (Language::En, "constellation_zoom_off") => "Zoom off",
+        (Language::En, "constellation_not_visible_here") => "Not visible from current city",
+        (Language::En, "constellation_pulled_back") => "Zoom returned to full sky",
+        (Language::En, "constellation_hidden_hint") => "Tab selects a visible constellation",
         (Language::En, "legend") => "Legend",
         (Language::En, "legend_bright_star") => "bright star",
         (Language::En, "legend_dim_star") => "dim star",
@@ -78,10 +86,10 @@ pub fn tr(language: Language, key: &str) -> &'static str {
             "Tab/Up/Down move · Left/Right preset · Enter next/save · Esc back"
         }
         (Language::En, "footer") => {
-            "q quit · ←/→ city · space pause · x pointer · +/- mag · [/] hour · / search · Tab const · c lines · h tonight · o settings · ? help"
+            "q quit · ←/→ city · space pause · x pointer · z zoom · +/- mag · [/] hour · / search · Tab const · c lines · h tonight · o settings · ? help"
         }
         (Language::En, "footer_compact") => {
-            "q · ←/→ city · space · x pointer · +/- mag · / search · Tab · c lines · o · ?"
+            "q · ←/→ city · space · x pointer · z zoom · +/- mag · / search · Tab · c lines · o · ?"
         }
         (Language::En, "help_body") => {
             "Navigation\nq      quit\nEsc    clear selected target; quit if nothing is selected\n←/→    switch city preset\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      setup location\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, limiting magnitude."
@@ -140,6 +148,14 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "planet") => "行星",
         (Language::Zh, "deep_sky") => "深空",
         (Language::Zh, "constellation") => "星座",
+        (Language::Zh, "constellation_zoom") => "放大",
+        (Language::Zh, "constellation_zoom_hint") => "z 放大 · 放大时 Tab 切换",
+        (Language::Zh, "constellation_zoom_exit_hint") => "z/Esc 退出放大 · Tab 切换",
+        (Language::Zh, "constellation_zoom_on") => "已放大",
+        (Language::Zh, "constellation_zoom_off") => "已退出放大",
+        (Language::Zh, "constellation_not_visible_here") => "当前城市此刻不可见",
+        (Language::Zh, "constellation_pulled_back") => "已拉回全局天空",
+        (Language::Zh, "constellation_hidden_hint") => "Tab 可切换到可见星座",
         (Language::Zh, "legend") => "图例",
         (Language::Zh, "legend_bright_star") => "亮星",
         (Language::Zh, "legend_dim_star") => "暗星",
@@ -166,10 +182,10 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "help_hint") => "? 帮助",
         (Language::Zh, "setup_hint") => "Tab/上下 切换 · 左右 预设 · Enter 下一项/保存 · Esc 返回",
         (Language::Zh, "footer") => {
-            "q 退出 · ←/→ 城市 · space 暂停 · x 指针 · +/- 星等 · [/] 小时 · / 搜索 · Tab 星座 · c 连线 · h 今晚 · o 设置 · ? 帮助"
+            "q 退出 · ←/→ 城市 · space 暂停 · x 指针 · z 放大 · +/- 星等 · [/] 小时 · / 搜索 · Tab 星座 · c 连线 · h 今晚 · o 设置 · ? 帮助"
         }
         (Language::Zh, "footer_compact") => {
-            "q · ←/→ 城市 · space · x 指针 · +/- 星等 · / 搜索 · Tab · c 连线 · o · ?"
+            "q · ←/→ 城市 · space · x 指针 · z 放大 · +/- 星等 · / 搜索 · Tab · c 连线 · o · ?"
         }
         (Language::Zh, "help_body") => {
             "导航\nq      退出\nEsc    取消选中目标；无选中目标时退出\n←/→    切换城市预设\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      设置位置\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、极限星等。"

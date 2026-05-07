@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, Utc};
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
 use crate::{
     astro,
@@ -16,6 +16,10 @@ use crate::{
     deep_sky::{self, DeepSkyObject},
     i18n, planets, star_aliases,
 };
+
+const POINTER_FAST_STEP: isize = 2;
+const POINTER_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
+const SKY_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(720);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -517,6 +521,77 @@ pub struct PointerState {
     pub hits: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ZoomBounds {
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZoomViewport {
+    min_x: f64,
+    max_x: f64,
+    min_y: f64,
+    max_y: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SkyTransition {
+    kind: SkyTransitionKind,
+    started: Instant,
+    duration: StdDuration,
+}
+
+#[derive(Debug, Clone)]
+enum SkyTransitionKind {
+    City {
+        from: Location,
+        to: Location,
+    },
+    Zoom {
+        from_code: String,
+        to_code: String,
+    },
+    ZoomIn {
+        code: String,
+    },
+    ZoomOut {
+        code: String,
+    },
+    CityZoomOut {
+        from: Location,
+        to: Location,
+        code: String,
+    },
+    Time {
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SkyViewMapper {
+    viewport: ZoomViewport,
+    source_width: usize,
+    source_height: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ZoomRenderView {
+    pub(crate) stars: Vec<astro::VisibleStar>,
+    mapper: SkyViewMapper,
+}
+
+impl ZoomRenderView {
+    pub(crate) fn project_horizontal(&self, altitude: f64, azimuth: f64) -> Option<(usize, usize)> {
+        self.mapper.project_horizontal(altitude, azimuth)
+    }
+}
+
 pub struct App {
     pub config: Config,
     pub config_path: PathBuf,
@@ -529,6 +604,8 @@ pub struct App {
     pub search: SearchState,
     pub pointer: PointerState,
     pub selected_target: Option<Target>,
+    pub constellation_zoom: bool,
+    pub constellation_zoom_code: Option<String>,
     pub message: String,
     pub can_cancel_setup: bool,
     pub help: bool,
@@ -541,6 +618,8 @@ pub struct App {
     pub last_tour_switch: Instant,
     pub animation_tick: u64,
     pub opening_ticks: u8,
+    last_pointer_move: Option<(KeyCode, Instant)>,
+    sky_transition: Option<SkyTransition>,
 }
 
 impl App {
@@ -570,6 +649,8 @@ impl App {
             search: SearchState::default(),
             pointer: PointerState::default(),
             selected_target: None,
+            constellation_zoom: false,
+            constellation_zoom_code: None,
             message: String::new(),
             can_cancel_setup,
             help: false,
@@ -582,10 +663,19 @@ impl App {
             last_tour_switch: Instant::now(),
             animation_tick: 0,
             opening_ticks: 0,
+            last_pointer_move: None,
+            sky_transition: None,
         }
     }
 
     pub fn now(&self) -> DateTime<Utc> {
+        if let Some(SkyTransition {
+            kind: SkyTransitionKind::Time { from, to },
+            ..
+        }) = &self.sky_transition
+        {
+            return lerp_time(*from, *to, self.transition_progress().unwrap_or(1.0));
+        }
         if self.paused {
             self.time_base
         } else {
@@ -604,9 +694,23 @@ impl App {
         {
             self.advance_tour_city();
         }
+        if self
+            .sky_transition
+            .as_ref()
+            .is_some_and(|transition| transition.is_finished())
+        {
+            self.sky_transition = None;
+            if self.pointer.active {
+                self.update_pointer_hover();
+            }
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        if matches!(key.kind, KeyEventKind::Release) {
+            return Ok(());
+        }
+
         if self.help {
             match key.code {
                 KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => self.help = false,
@@ -636,22 +740,27 @@ impl App {
             match key.code {
                 KeyCode::Esc => {
                     self.pointer.active = false;
+                    self.last_pointer_move = None;
                     return Ok(());
                 }
                 KeyCode::Left => {
-                    self.move_pointer(-1, 0);
+                    let step = self.pointer_move_step(key);
+                    self.move_pointer(-step, 0);
                     return Ok(());
                 }
                 KeyCode::Right => {
-                    self.move_pointer(1, 0);
+                    let step = self.pointer_move_step(key);
+                    self.move_pointer(step, 0);
                     return Ok(());
                 }
                 KeyCode::Up => {
-                    self.move_pointer(0, -1);
+                    let step = self.pointer_move_step(key);
+                    self.move_pointer(0, -step);
                     return Ok(());
                 }
                 KeyCode::Down => {
-                    self.move_pointer(0, 1);
+                    let step = self.pointer_move_step(key);
+                    self.move_pointer(0, step);
                     return Ok(());
                 }
                 KeyCode::Char('x') => {
@@ -665,8 +774,13 @@ impl App {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Esc => {
-                if self.selected_target.is_some() {
+                if self.constellation_zoom {
+                    self.toggle_constellation_zoom();
+                } else if self.selected_target.is_some() {
                     self.selected_target = None;
+                    self.constellation_zoom = false;
+                    self.constellation_zoom_code = None;
+                    self.sky_transition = None;
                     self.message = i18n::tr(self.config.language, "selection_cleared").to_string();
                 } else {
                     self.should_quit = true;
@@ -737,6 +851,7 @@ impl App {
                 self.save()?;
             }
             KeyCode::Char('x') => self.toggle_pointer(),
+            KeyCode::Char('z') => self.toggle_constellation_zoom(),
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 self.adjust_magnitude(0.1)?;
             }
@@ -791,6 +906,20 @@ impl App {
             KeyCode::Esc => self.screen = Screen::Sky,
             KeyCode::Enter => {
                 if let Some(result) = self.search.results.get(self.search.selected).cloned() {
+                    if !matches!(result.target, Target::Constellation(_)) {
+                        self.constellation_zoom = false;
+                        self.constellation_zoom_code = None;
+                        self.sky_transition = None;
+                    } else if self.constellation_zoom {
+                        if let Target::Constellation(code) = &result.target {
+                            if let Some(from_code) =
+                                self.selected_constellation_code().map(ToString::to_string)
+                            {
+                                self.start_zoom_transition(from_code, code.clone());
+                            }
+                            self.constellation_zoom_code = Some(code.clone());
+                        }
+                    }
                     self.selected_target = Some(result.target);
                     self.message = result.label;
                 }
@@ -929,7 +1058,7 @@ impl App {
         self.screen = Screen::Sky;
         self.message = i18n::tr(self.config.language, "saved").to_string();
         if self.config.display.animations {
-            self.opening_ticks = 14;
+            self.opening_ticks = 90;
         }
         Ok(())
     }
@@ -951,18 +1080,35 @@ impl App {
 
     fn apply_preset(&mut self, index: usize, persist: bool) -> io::Result<()> {
         let preset = PRESETS[index];
-        self.config.location = Location {
+        let from_location = self.config.location.clone();
+        let to_location = Location {
             name: preset.en.to_string(),
             latitude: preset.latitude,
             longitude: preset.longitude,
             timezone: preset.timezone.to_string(),
         };
+        let hidden_zoom_code = self
+            .constellation_zoom
+            .then(|| self.selected_constellation_code().map(ToString::to_string))
+            .flatten()
+            .filter(|code| !self.constellation_visible_at(code, &to_location));
+        if let Some(code) = hidden_zoom_code {
+            self.constellation_zoom = false;
+            self.constellation_zoom_code = None;
+            self.selected_target = Some(Target::Constellation(code.clone()));
+            self.config.display.side_panel = true;
+            self.start_city_zoom_out_transition(from_location, to_location.clone(), code.clone());
+            self.message = self.constellation_not_visible_message(&code, &to_location);
+        } else {
+            self.start_city_transition(from_location, to_location.clone());
+            self.message = format!(
+                "{}: {}",
+                i18n::tr(self.config.language, "observer"),
+                to_location.name
+            );
+        }
+        self.config.location = to_location;
         self.setup = SetupState::from_location(&self.config.location);
-        self.message = format!(
-            "{}: {}",
-            i18n::tr(self.config.language, "observer"),
-            self.config.location.name
-        );
         if persist { self.save() } else { Ok(()) }
     }
 
@@ -973,13 +1119,17 @@ impl App {
             self.time_base = self.now();
             self.clock_base = Instant::now();
             self.paused = true;
+            self.clear_time_transition();
             self.message = i18n::tr(self.config.language, "paused").to_string();
         }
     }
 
     fn shift_time(&mut self, delta: Duration) {
-        self.time_base = self.now() + delta;
+        let from_time = self.now();
+        let to_time = from_time + delta;
+        self.time_base = to_time;
         self.clock_base = Instant::now();
+        self.start_time_transition(from_time, to_time);
         self.message = i18n::tr(self.config.language, "time_shifted").to_string();
     }
 
@@ -987,11 +1137,13 @@ impl App {
         self.time_base = Utc::now();
         self.clock_base = Instant::now();
         self.paused = false;
+        self.clear_time_transition();
         self.message = i18n::tr(self.config.language, "live").to_string();
     }
 
     fn toggle_tour(&mut self) {
         if let Some(origin) = self.tour_origin.take() {
+            self.start_city_transition(self.config.location.clone(), origin.clone());
             self.config.location = origin;
             self.setup = SetupState::from_location(&self.config.location);
             self.message = i18n::tr(self.config.language, "tour_off").to_string();
@@ -1103,6 +1255,7 @@ impl App {
             self.message = i18n::tr(self.config.language, "no_visible_constellations").to_string();
             return;
         }
+        let previous = self.selected_constellation_code().map(ToString::to_string);
         let current = self.selected_constellation_code().and_then(|code| {
             codes
                 .iter()
@@ -1110,13 +1263,83 @@ impl App {
         });
         let next = next_position(current, codes.len(), forward);
         self.selected_target = Some(Target::Constellation(codes[next].clone()));
+        if self.constellation_zoom {
+            if let Some(from_code) = previous {
+                self.start_zoom_transition(from_code, codes[next].clone());
+            }
+            self.constellation_zoom_code = Some(codes[next].clone());
+            if self.pointer.active {
+                self.update_pointer_hover();
+            }
+        }
     }
 
     pub fn selected_constellation_code(&self) -> Option<&str> {
+        if self.constellation_zoom {
+            if let Some(code) = self.constellation_zoom_code.as_deref() {
+                return Some(code);
+            }
+        }
         match &self.selected_target {
             Some(Target::Constellation(code)) => Some(code.as_str()),
             _ => None,
         }
+    }
+
+    pub fn render_location(&self) -> Location {
+        if let Some(transition) = &self.sky_transition {
+            match &transition.kind {
+                SkyTransitionKind::City { from, to }
+                | SkyTransitionKind::CityZoomOut { from, to, .. } => {
+                    return lerp_location(from, to, transition.eased_progress());
+                }
+                _ => {}
+            }
+        }
+        self.config.location.clone()
+    }
+
+    pub fn zoom_transition(&self) -> Option<(&str, &str, f64)> {
+        let Some(SkyTransition {
+            kind: SkyTransitionKind::Zoom { from_code, to_code },
+            ..
+        }) = &self.sky_transition
+        else {
+            return None;
+        };
+        Some((
+            from_code.as_str(),
+            to_code.as_str(),
+            self.transition_progress()?,
+        ))
+    }
+
+    pub fn zoom_render_code(&self) -> Option<&str> {
+        if let Some(SkyTransition {
+            kind:
+                SkyTransitionKind::ZoomIn { code }
+                | SkyTransitionKind::ZoomOut { code }
+                | SkyTransitionKind::CityZoomOut { code, .. },
+            ..
+        }) = &self.sky_transition
+        {
+            return Some(code.as_str());
+        }
+        if let Some((from_code, to_code, progress)) = self.zoom_transition() {
+            return Some(if progress < 0.5 { from_code } else { to_code });
+        }
+        self.selected_constellation_code()
+    }
+
+    pub fn should_render_zoomed_sky(&self) -> bool {
+        self.constellation_zoom
+            || matches!(
+                self.sky_transition,
+                Some(SkyTransition {
+                    kind: SkyTransitionKind::ZoomOut { .. } | SkyTransitionKind::CityZoomOut { .. },
+                    ..
+                })
+            )
     }
 
     pub fn star_by_hip(&self, hip: u32) -> Option<Star> {
@@ -1153,6 +1376,32 @@ impl App {
         codes.into_iter().collect()
     }
 
+    pub fn constellation_visible(&self, code: &str) -> bool {
+        self.constellation_visible_at(code, &self.config.location)
+    }
+
+    fn constellation_visible_at(&self, code: &str, location: &Location) -> bool {
+        let now = self.now();
+        let line_visible = self
+            .constellation_lines
+            .iter()
+            .filter(|line| line.code.eq_ignore_ascii_case(code))
+            .any(|line| {
+                line.hips.windows(2).any(|pair| {
+                    self.line_endpoint_visible_at(pair[0], location, now)
+                        && self.line_endpoint_visible_at(pair[1], location, now)
+                })
+            });
+        line_visible
+            || self.catalog.stars.iter().any(|star| {
+                star.constellation.eq_ignore_ascii_case(code)
+                    && star.magnitude <= self.config.display.limiting_magnitude
+                    && astro::horizontal_position(star.ra_hours, star.dec_degrees, location, now)
+                        .altitude
+                        > 0.0
+            })
+    }
+
     pub fn set_pointer_canvas(&mut self, width: usize, height: usize) {
         if width == 0 || height == 0 {
             self.pointer.width = 0;
@@ -1184,6 +1433,7 @@ impl App {
 
     fn toggle_pointer(&mut self) {
         self.pointer.active = !self.pointer.active;
+        self.last_pointer_move = None;
         if self.pointer.active {
             if self.pointer.width > 0 && self.pointer.height > 0 {
                 self.pointer.x = self.pointer.x.min(self.pointer.width - 1);
@@ -1198,6 +1448,146 @@ impl App {
             self.pointer.hovered = None;
             self.pointer.hits.clear();
             self.message = i18n::tr(self.config.language, "pointer_off").to_string();
+        }
+    }
+
+    fn pointer_move_step(&mut self, key: KeyEvent) -> isize {
+        let now = Instant::now();
+        let is_fast_repeat = matches!(key.kind, KeyEventKind::Repeat)
+            || self.last_pointer_move.is_some_and(|(code, at)| {
+                code == key.code && now.duration_since(at) <= POINTER_HOLD_WINDOW
+            });
+        self.last_pointer_move = Some((key.code, now));
+        if is_fast_repeat { POINTER_FAST_STEP } else { 1 }
+    }
+
+    fn start_city_transition(&mut self, from: Location, to: Location) {
+        if !self.config.display.animations || same_location(&from, &to) {
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::City { from, to },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn start_zoom_transition(&mut self, from_code: String, to_code: String) {
+        if !self.config.display.animations || from_code.eq_ignore_ascii_case(&to_code) {
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::Zoom { from_code, to_code },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn start_zoom_in_transition(&mut self, code: String) {
+        if !self.config.display.animations {
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::ZoomIn { code },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn start_zoom_out_transition(&mut self, code: String) {
+        if !self.config.display.animations {
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::ZoomOut { code },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn start_city_zoom_out_transition(&mut self, from: Location, to: Location, code: String) {
+        if !self.config.display.animations {
+            self.sky_transition = None;
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::CityZoomOut { from, to, code },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn start_time_transition(&mut self, from: DateTime<Utc>, to: DateTime<Utc>) {
+        if !self.config.display.animations || from == to {
+            return;
+        }
+        self.sky_transition = Some(SkyTransition {
+            kind: SkyTransitionKind::Time { from, to },
+            started: Instant::now(),
+            duration: SKY_TRANSITION_DURATION,
+        });
+    }
+
+    fn clear_time_transition(&mut self) {
+        if matches!(
+            self.sky_transition,
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Time { .. },
+                ..
+            })
+        ) {
+            self.sky_transition = None;
+        }
+    }
+
+    fn transition_progress(&self) -> Option<f64> {
+        self.sky_transition
+            .as_ref()
+            .map(SkyTransition::eased_progress)
+    }
+
+    fn toggle_constellation_zoom(&mut self) {
+        if self.constellation_zoom {
+            let code = self.selected_constellation_code().map(ToString::to_string);
+            self.constellation_zoom = false;
+            self.constellation_zoom_code = None;
+            if let Some(code) = code {
+                self.start_zoom_out_transition(code);
+            } else {
+                self.sky_transition = None;
+            }
+            if self.pointer.active {
+                self.update_pointer_hover();
+            }
+            self.message = i18n::tr(self.config.language, "constellation_zoom_off").to_string();
+            return;
+        }
+
+        if self.selected_constellation_code().is_none() {
+            self.cycle_visible_constellation(true);
+        }
+
+        if let Some(code) = self.selected_constellation_code().map(ToString::to_string) {
+            if !self.constellation_visible_at(&code, &self.config.location) {
+                self.constellation_zoom = false;
+                self.constellation_zoom_code = None;
+                self.config.display.side_panel = true;
+                self.message = self.constellation_not_visible_message(&code, &self.config.location);
+                return;
+            }
+            let meta = constellations::meta_for(&code);
+            self.constellation_zoom = true;
+            self.constellation_zoom_code = Some(code.clone());
+            self.start_zoom_in_transition(code);
+            self.config.display.side_panel = true;
+            if self.pointer.active {
+                self.update_pointer_hover();
+            }
+            self.message = format!(
+                "{} {}",
+                meta.en,
+                i18n::tr(self.config.language, "constellation_zoom_on")
+            );
         }
     }
 
@@ -1223,14 +1613,30 @@ impl App {
             return;
         }
 
-        let visible = astro::visible_stars(
-            &self.catalog.stars,
-            &self.config.location,
-            self.now(),
-            self.config.display.limiting_magnitude,
-            width,
-            height,
-        );
+        let visible = if self.constellation_zoom {
+            self.zoomed_visible_stars_for_current_view(width, height)
+                .unwrap_or_else(|| {
+                    let location = self.render_location();
+                    astro::visible_stars(
+                        &self.catalog.stars,
+                        &location,
+                        self.now(),
+                        self.config.display.limiting_magnitude,
+                        width,
+                        height,
+                    )
+                })
+        } else {
+            let location = self.render_location();
+            astro::visible_stars(
+                &self.catalog.stars,
+                &location,
+                self.now(),
+                self.config.display.limiting_magnitude,
+                width,
+                height,
+            )
+        };
         let hits = visible
             .into_iter()
             .filter(|visible| visible.x == self.pointer.x && visible.y == self.pointer.y)
@@ -1272,16 +1678,183 @@ impl App {
             .collect()
     }
 
+    pub fn zoomed_visible_stars_for_current_view(
+        &self,
+        width: usize,
+        height: usize,
+    ) -> Option<Vec<astro::VisibleStar>> {
+        self.zoom_render_view(width, height).map(|view| view.stars)
+    }
+
+    pub(crate) fn zoom_render_view(&self, width: usize, height: usize) -> Option<ZoomRenderView> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let source_width = width.saturating_mul(4).max(width).max(1);
+        let source_height = height.saturating_mul(4).max(height).max(1);
+        let location = self.render_location();
+        let source_visible = astro::visible_stars(
+            &self.catalog.stars,
+            &location,
+            self.now(),
+            6.0,
+            source_width,
+            source_height,
+        );
+        let viewport = self.current_zoom_viewport(&source_visible, source_width, source_height)?;
+        let mapper = SkyViewMapper::new(viewport, source_width, source_height, width, height);
+        Some(ZoomRenderView {
+            stars: map_zoomed_visible(source_visible, mapper),
+            mapper,
+        })
+    }
+
+    fn current_zoom_viewport(
+        &self,
+        source_visible: &[astro::VisibleStar],
+        source_width: usize,
+        source_height: usize,
+    ) -> Option<ZoomViewport> {
+        match &self.sky_transition {
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Zoom { from_code, to_code },
+                ..
+            }) => {
+                let from_bounds = self.constellation_zoom_bounds(
+                    source_visible,
+                    from_code,
+                    source_width,
+                    source_height,
+                )?;
+                let to_bounds = self.constellation_zoom_bounds(
+                    source_visible,
+                    to_code,
+                    source_width,
+                    source_height,
+                )?;
+                Some(from_bounds.interpolate(to_bounds, self.transition_progress()?))
+            }
+            Some(SkyTransition {
+                kind: SkyTransitionKind::ZoomIn { code },
+                ..
+            }) => {
+                let full_bounds = ZoomBounds::full(source_width, source_height);
+                let target_bounds = self.constellation_zoom_bounds(
+                    source_visible,
+                    code,
+                    source_width,
+                    source_height,
+                )?;
+                Some(full_bounds.interpolate(target_bounds, self.transition_progress()?))
+            }
+            Some(SkyTransition {
+                kind: SkyTransitionKind::ZoomOut { code },
+                ..
+            }) => {
+                let full_bounds = ZoomBounds::full(source_width, source_height);
+                let target_bounds = self.constellation_zoom_bounds(
+                    source_visible,
+                    code,
+                    source_width,
+                    source_height,
+                )?;
+                Some(target_bounds.interpolate(full_bounds, self.transition_progress()?))
+            }
+            Some(SkyTransition {
+                kind: SkyTransitionKind::CityZoomOut { from, code, .. },
+                ..
+            }) => {
+                let full_bounds = ZoomBounds::full(source_width, source_height);
+                let from_visible = astro::visible_stars(
+                    &self.catalog.stars,
+                    from,
+                    self.now(),
+                    6.0,
+                    source_width,
+                    source_height,
+                );
+                let target_bounds = self
+                    .constellation_zoom_bounds(&from_visible, code, source_width, source_height)
+                    .unwrap_or(full_bounds);
+                Some(target_bounds.interpolate(full_bounds, self.transition_progress()?))
+            }
+            _ => {
+                let code = self.selected_constellation_code()?;
+                let target_bounds = self.constellation_zoom_bounds(
+                    source_visible,
+                    code,
+                    source_width,
+                    source_height,
+                )?;
+                Some(target_bounds.interpolate(target_bounds, 1.0))
+            }
+        }
+    }
+
+    fn constellation_zoom_bounds(
+        &self,
+        visible: &[astro::VisibleStar],
+        code: &str,
+        width: usize,
+        height: usize,
+    ) -> Option<ZoomBounds> {
+        let points = visible
+            .iter()
+            .map(|star| (star.star.hip, (star.x, star.y)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut coords = self
+            .constellation_lines
+            .iter()
+            .filter(|line| line.code.eq_ignore_ascii_case(code))
+            .flat_map(|line| line.hips.iter())
+            .filter_map(|hip| points.get(hip).copied())
+            .collect::<Vec<_>>();
+
+        if coords.len() < 2 {
+            coords.extend(
+                visible
+                    .iter()
+                    .filter(|star| star.star.constellation.eq_ignore_ascii_case(code))
+                    .map(|star| (star.x, star.y)),
+            );
+        }
+        if coords.is_empty() {
+            return None;
+        }
+
+        let min_x = coords.iter().map(|(x, _)| *x).min()?;
+        let max_x = coords.iter().map(|(x, _)| *x).max()?;
+        let min_y = coords.iter().map(|(_, y)| *y).min()?;
+        let max_y = coords.iter().map(|(_, y)| *y).max()?;
+        Some(ZoomBounds::expanded(
+            min_x, max_x, min_y, max_y, width, height,
+        ))
+    }
+
     fn line_endpoint_visible(&self, hip: u32, time: DateTime<Utc>) -> bool {
+        self.line_endpoint_visible_at(hip, &self.config.location, time)
+    }
+
+    fn line_endpoint_visible_at(&self, hip: u32, location: &Location, time: DateTime<Utc>) -> bool {
         let Some(star) = self.star_by_hip(hip) else {
             return false;
         };
         if star.magnitude > self.config.display.limiting_magnitude {
             return false;
         }
-        astro::horizontal_position(star.ra_hours, star.dec_degrees, &self.config.location, time)
-            .altitude
-            > 0.0
+        astro::horizontal_position(star.ra_hours, star.dec_degrees, location, time).altitude > 0.0
+    }
+
+    fn constellation_not_visible_message(&self, code: &str, location: &Location) -> String {
+        let meta = constellations::meta_for(code);
+        format!(
+            "{}: {} ({}) · {}",
+            i18n::tr(self.config.language, "constellation_not_visible_here"),
+            meta.en,
+            meta.code,
+            location.name
+        )
     }
 
     fn adjust_magnitude(&mut self, delta: f64) -> io::Result<()> {
@@ -1293,6 +1866,173 @@ impl App {
     fn save(&self) -> io::Result<()> {
         config::save_config(&self.config_path, &self.config)
     }
+}
+
+impl ZoomBounds {
+    fn full(width: usize, height: usize) -> Self {
+        Self {
+            min_x: 0,
+            max_x: width.saturating_sub(1),
+            min_y: 0,
+            max_y: height.saturating_sub(1),
+        }
+    }
+
+    fn expanded(
+        min_x: usize,
+        max_x: usize,
+        min_y: usize,
+        max_y: usize,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        let span_x = max_x.saturating_sub(min_x).max(1);
+        let span_y = max_y.saturating_sub(min_y).max(1);
+        let pad_x = (span_x / 3).max(8);
+        let pad_y = (span_y / 3).max(4);
+        Self {
+            min_x: min_x.saturating_sub(pad_x),
+            max_x: max_x.saturating_add(pad_x).min(width.saturating_sub(1)),
+            min_y: min_y.saturating_sub(pad_y),
+            max_y: max_y.saturating_add(pad_y).min(height.saturating_sub(1)),
+        }
+    }
+
+    fn interpolate(self, other: Self, progress: f64) -> ZoomViewport {
+        let t = progress.clamp(0.0, 1.0);
+        ZoomViewport {
+            min_x: lerp(self.min_x as f64, other.min_x as f64, t),
+            max_x: lerp(self.max_x as f64, other.max_x as f64, t),
+            min_y: lerp(self.min_y as f64, other.min_y as f64, t),
+            max_y: lerp(self.max_y as f64, other.max_y as f64, t),
+        }
+    }
+}
+
+impl ZoomViewport {
+    fn contains(self, x: usize, y: usize) -> bool {
+        let x = x as f64;
+        let y = y as f64;
+        x >= self.min_x && x <= self.max_x && y >= self.min_y && y <= self.max_y
+    }
+
+    fn map(self, x: usize, y: usize, width: usize, height: usize) -> (usize, usize) {
+        let span_x = (self.max_x - self.min_x).max(1.0);
+        let span_y = (self.max_y - self.min_y).max(1.0);
+        let x =
+            (((x as f64 - self.min_x) / span_x) * width.saturating_sub(1) as f64).round() as usize;
+        let y =
+            (((y as f64 - self.min_y) / span_y) * height.saturating_sub(1) as f64).round() as usize;
+        (
+            x.min(width.saturating_sub(1)),
+            y.min(height.saturating_sub(1)),
+        )
+    }
+}
+
+impl SkyViewMapper {
+    fn new(
+        viewport: ZoomViewport,
+        source_width: usize,
+        source_height: usize,
+        width: usize,
+        height: usize,
+    ) -> Self {
+        Self {
+            viewport,
+            source_width,
+            source_height,
+            width,
+            height,
+        }
+    }
+
+    fn map_source(self, x: usize, y: usize) -> Option<(usize, usize)> {
+        self.viewport
+            .contains(x, y)
+            .then(|| self.viewport.map(x, y, self.width, self.height))
+    }
+
+    fn project_horizontal(self, altitude: f64, azimuth: f64) -> Option<(usize, usize)> {
+        let (x, y) = astro::project_dome(altitude, azimuth, self.source_width, self.source_height)?;
+        self.map_source(x, y)
+    }
+}
+
+impl SkyTransition {
+    fn progress(&self) -> f64 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (self.started.elapsed().as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0)
+    }
+
+    fn eased_progress(&self) -> f64 {
+        smoothstep(self.progress())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.progress() >= 1.0
+    }
+}
+
+fn map_zoomed_visible(
+    visible: Vec<astro::VisibleStar>,
+    mapper: SkyViewMapper,
+) -> Vec<astro::VisibleStar> {
+    visible
+        .into_iter()
+        .filter_map(|visible| {
+            let (x, y) = mapper.map_source(visible.x, visible.y)?;
+            Some(astro::VisibleStar {
+                star: visible.star,
+                x,
+                y,
+            })
+        })
+        .collect()
+}
+
+fn lerp_location(from: &Location, to: &Location, progress: f64) -> Location {
+    let t = progress.clamp(0.0, 1.0);
+    Location {
+        name: format!("{} -> {}", from.name, to.name),
+        latitude: lerp(from.latitude, to.latitude, t),
+        longitude: lerp_longitude(from.longitude, to.longitude, t),
+        timezone: to.timezone.clone(),
+    }
+}
+
+fn same_location(left: &Location, right: &Location) -> bool {
+    (left.latitude - right.latitude).abs() < 0.0001
+        && (left.longitude - right.longitude).abs() < 0.0001
+        && left.timezone == right.timezone
+}
+
+fn lerp(from: f64, to: f64, progress: f64) -> f64 {
+    from + (to - from) * progress
+}
+
+fn lerp_longitude(from: f64, to: f64, progress: f64) -> f64 {
+    let delta = ((to - from + 540.0) % 360.0) - 180.0;
+    normalize_longitude(from + delta * progress)
+}
+
+fn lerp_time(from: DateTime<Utc>, to: DateTime<Utc>, progress: f64) -> DateTime<Utc> {
+    let t = progress.clamp(0.0, 1.0);
+    let from_millis = from.timestamp_millis() as f64;
+    let to_millis = to.timestamp_millis() as f64;
+    let millis = lerp(from_millis, to_millis, t).round() as i64;
+    DateTime::from_timestamp_millis(millis).unwrap_or(to)
+}
+
+fn normalize_longitude(value: f64) -> f64 {
+    ((value + 180.0).rem_euclid(360.0)) - 180.0
+}
+
+fn smoothstep(progress: f64) -> f64 {
+    let t = progress.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn city_indices() -> Vec<usize> {
@@ -1329,6 +2069,7 @@ pub fn settings_count() -> usize {
 mod tests {
     use super::*;
     use crate::config::DisplayConfig;
+    use chrono::TimeZone;
 
     fn test_app(location: Location) -> App {
         App::new(
@@ -1357,6 +2098,15 @@ mod tests {
         )
     }
 
+    fn preset_location(preset: Preset) -> Location {
+        Location {
+            name: preset.en.to_string(),
+            latitude: preset.latitude,
+            longitude: preset.longitude,
+            timezone: preset.timezone.to_string(),
+        }
+    }
+
     #[test]
     fn sky_arrows_cycle_city_presets() {
         let mut app = test_app(Location {
@@ -1367,6 +2117,14 @@ mod tests {
         });
         app.cycle_city(true).unwrap();
         assert_eq!(app.config.location.name, "Beijing");
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::City { .. },
+                ..
+            })
+        ));
+        assert!(app.render_location().name.contains("Shanghai -> Beijing"));
         app.cycle_city(false).unwrap();
         assert_eq!(app.config.location.name, "Shanghai");
     }
@@ -1406,8 +2164,69 @@ mod tests {
     }
 
     #[test]
+    fn city_switch_pulls_back_when_zoom_target_is_hidden() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-hidden-zoom-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc.with_ymd_and_hms(2026, 5, 7, 14, 0, 0).unwrap()),
+        );
+
+        let mut scenario = None;
+        'outer: for (from_index, from_preset) in PRESETS.iter().copied().enumerate() {
+            if from_preset.custom {
+                continue;
+            }
+            app.config.location = preset_location(from_preset);
+            for code in app.visible_constellation_codes() {
+                for (to_index, to_preset) in PRESETS.iter().copied().enumerate() {
+                    if to_preset.custom || from_index == to_index {
+                        continue;
+                    }
+                    let to_location = preset_location(to_preset);
+                    if !app.constellation_visible_at(&code, &to_location) {
+                        scenario = Some((from_index, to_index, code));
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let (from_index, to_index, code) = scenario.expect("need a constellation hidden elsewhere");
+        app.config.location = preset_location(PRESETS[from_index]);
+        app.selected_target = Some(Target::Constellation(code.clone()));
+        app.constellation_zoom = true;
+        app.constellation_zoom_code = Some(code.clone());
+
+        app.apply_preset(to_index, false).unwrap();
+
+        assert!(!app.constellation_zoom);
+        assert!(app.constellation_zoom_code.is_none());
+        assert_eq!(
+            app.selected_target,
+            Some(Target::Constellation(code.clone()))
+        );
+        assert!(app.message.contains(i18n::tr(
+            app.config.language,
+            "constellation_not_visible_here"
+        )));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::CityZoomOut {
+                    code: transition_code,
+                    ..
+                },
+                ..
+            }) if transition_code == &code
+        ));
+        assert!(app.should_render_zoomed_sky());
+    }
+
+    #[test]
     fn time_shift_and_pause_are_stable() {
-        let base = Utc::now();
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
         let mut app = test_app(Location {
             name: "Shanghai".to_string(),
             latitude: 31.2304,
@@ -1417,6 +2236,17 @@ mod tests {
         app.time_base = base;
         app.paused = true;
         app.shift_time(Duration::hours(1));
+        assert_eq!(app.time_base, base + Duration::hours(1));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::Time { from, to },
+                ..
+            }) if *from == base && *to == base + Duration::hours(1)
+        ));
+        assert!(app.now() >= base);
+        assert!(app.now() <= base + Duration::hours(1));
+        app.sky_transition = None;
         assert_eq!(app.now(), base + Duration::hours(1));
         app.toggle_pause();
         assert!(!app.paused);
@@ -1457,6 +2287,97 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('c'))).unwrap();
         assert!(!app.help);
         assert!(!app.config.display.constellations);
+    }
+
+    #[test]
+    fn constellation_zoom_toggles_and_survives_tab_cycle() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-constellation-zoom-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        assert!(app.constellation_zoom);
+        let first = app.selected_constellation_code().unwrap().to_string();
+        assert_eq!(app.constellation_zoom_code.as_deref(), Some(first.as_str()));
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::ZoomIn { code },
+                ..
+            }) if code == &first
+        ));
+        assert!(app.should_render_zoomed_sky());
+        assert!(
+            app.zoomed_visible_stars_for_current_view(100, 28)
+                .unwrap()
+                .iter()
+                .all(|visible| visible.x < 100 && visible.y < 28)
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).unwrap();
+        assert!(app.constellation_zoom);
+        assert_ne!(app.selected_constellation_code(), Some(first.as_str()));
+        assert_eq!(
+            app.constellation_zoom_code.as_deref(),
+            app.selected_constellation_code()
+        );
+        let (from_code, to_code, progress) = app.zoom_transition().unwrap();
+        assert_eq!(from_code, first);
+        assert_eq!(Some(to_code), app.constellation_zoom_code.as_deref());
+        assert!((0.0..=1.0).contains(&progress));
+        assert!(
+            app.zoomed_visible_stars_for_current_view(100, 28)
+                .unwrap()
+                .iter()
+                .all(|visible| visible.x < 100 && visible.y < 28)
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Esc)).unwrap();
+        assert!(!app.constellation_zoom);
+        assert!(app.constellation_zoom_code.is_none());
+        assert!(app.selected_constellation_code().is_some());
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::ZoomOut { .. },
+                ..
+            })
+        ));
+        assert!(app.should_render_zoomed_sky());
+    }
+
+    #[test]
+    fn zoom_pointer_selects_star_without_leaving_zoom() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-zoom-pointer-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        let code = app.selected_constellation_code().unwrap().to_string();
+        app.set_pointer_canvas(100, 28);
+        let target = app
+            .zoomed_visible_stars_for_current_view(app.pointer.width, app.pointer.height)
+            .unwrap()
+            .into_iter()
+            .find(|visible| visible.star.constellation.eq_ignore_ascii_case(&code))
+            .unwrap();
+        app.pointer.active = true;
+        app.pointer.x = target.x;
+        app.pointer.y = target.y;
+        app.update_pointer_hover();
+
+        assert!(app.constellation_zoom);
+        assert_eq!(app.constellation_zoom_code.as_deref(), Some(code.as_str()));
+        assert_eq!(app.selected_target, Some(Target::Star(target.star.hip)));
+        assert_eq!(app.selected_constellation_code(), Some(code.as_str()));
     }
 
     #[test]
@@ -1536,7 +2457,16 @@ mod tests {
         assert!(app.pointer.active);
         let start_x = app.pointer.x;
         app.handle_key(KeyEvent::from(KeyCode::Right)).unwrap();
-        assert_eq!(app.pointer.x, start_x + 1);
+        let after_press = start_x + 1;
+        assert_eq!(app.pointer.x, after_press);
+
+        app.handle_key(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            crossterm::event::KeyModifiers::NONE,
+            KeyEventKind::Repeat,
+        ))
+        .unwrap();
+        assert_eq!(app.pointer.x, after_press + 2);
 
         let visible = astro::visible_stars(
             &app.catalog.stars,
