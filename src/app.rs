@@ -517,8 +517,8 @@ pub struct PointerState {
     pub y: usize,
     pub width: usize,
     pub height: usize,
-    pub hovered: Option<u32>,
-    pub hits: Vec<u32>,
+    pub hovered: Option<Target>,
+    pub hits: Vec<Target>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1613,56 +1613,98 @@ impl App {
             return;
         }
 
-        let visible = if self.constellation_zoom {
-            self.zoomed_visible_stars_for_current_view(width, height)
-                .unwrap_or_else(|| {
-                    let location = self.render_location();
-                    astro::visible_stars(
-                        &self.catalog.stars,
-                        &location,
-                        self.now(),
-                        self.config.display.limiting_magnitude,
-                        width,
-                        height,
-                    )
-                })
+        let location = self.render_location();
+        let time = self.now();
+        let zoom_view = self
+            .should_render_zoomed_sky()
+            .then(|| self.zoom_render_view(width, height))
+            .flatten();
+        let visible = if let Some(view) = zoom_view.as_ref() {
+            view.stars.clone()
         } else {
-            let location = self.render_location();
             astro::visible_stars(
                 &self.catalog.stars,
                 &location,
-                self.now(),
+                time,
                 self.config.display.limiting_magnitude,
                 width,
                 height,
             )
         };
-        let hits = visible
-            .into_iter()
-            .filter(|visible| visible.x == self.pointer.x && visible.y == self.pointer.y)
-            .collect::<Vec<_>>();
-        let mut sorted_hits = hits
+
+        let mut hits = Vec::new();
+        for visible in visible
             .iter()
-            .map(|visible| (visible.star.hip, visible.star.magnitude))
-            .collect::<Vec<_>>();
-        sorted_hits.sort_by(|a, b| {
+            .filter(|visible| visible.x == self.pointer.x && visible.y == self.pointer.y)
+        {
+            hits.push((
+                Target::Star(visible.star.hip),
+                visible.star.magnitude,
+                format!("star:{:010}", visible.star.hip),
+            ));
+        }
+
+        if self.config.display.planets {
+            for planet in planets::visible_planets(time) {
+                let horizontal = astro::horizontal_position(
+                    planet.ra_hours,
+                    planet.dec_degrees,
+                    &location,
+                    time,
+                );
+                let projected = if let Some(view) = zoom_view.as_ref() {
+                    view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+                } else {
+                    astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+                };
+                if projected == Some((self.pointer.x, self.pointer.y)) {
+                    hits.push((
+                        Target::Planet(planet.name),
+                        planet.magnitude - 0.25,
+                        format!("planet:{}", planet.name),
+                    ));
+                }
+            }
+        }
+
+        if self.config.display.deep_sky {
+            for object in &self.deep_sky {
+                if object.magnitude.unwrap_or(99.0) > 9.5 {
+                    continue;
+                }
+                let horizontal = astro::horizontal_position(
+                    object.ra_hours,
+                    object.dec_degrees,
+                    &location,
+                    time,
+                );
+                let projected = if let Some(view) = zoom_view.as_ref() {
+                    view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+                } else {
+                    astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+                };
+                if projected == Some((self.pointer.x, self.pointer.y)) {
+                    hits.push((
+                        Target::DeepSky(object.name),
+                        object.magnitude.unwrap_or(99.0) + 10.0,
+                        format!("deep:{}", object.name),
+                    ));
+                }
+            }
+        }
+
+        hits.sort_by(|a, b| {
             a.1.partial_cmp(&b.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.0.cmp(&b.0))
+                .then_with(|| a.2.cmp(&b.2))
         });
-        self.pointer.hits = sorted_hits.into_iter().map(|(hip, _)| hip).collect();
-        let nearest = hits.into_iter().min_by(|star_a, star_b| {
-            star_a
-                .star
-                .magnitude
-                .partial_cmp(&star_b.star.magnitude)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        hits.dedup_by(|a, b| a.0 == b.0);
+        self.pointer.hits = hits.into_iter().map(|(target, _, _)| target).collect();
 
-        if let Some(visible) = nearest {
-            self.pointer.hovered = Some(visible.star.hip);
-            self.selected_target = Some(Target::Star(visible.star.hip));
-            self.message = star_aliases::display_name_for(visible.star, self.config.language);
+        if let Some(target) = self.pointer.hits.first().cloned() {
+            self.pointer.hovered = Some(target.clone());
+            self.selected_target = Some(target.clone());
+            self.message = self.pointer_target_label(&target);
         } else {
             self.pointer.hovered = None;
             self.selected_target = None;
@@ -1670,14 +1712,44 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub fn stars_at_pointer(&self) -> Vec<Star> {
         self.pointer
             .hits
             .iter()
-            .filter_map(|hip| self.star_by_hip(*hip))
+            .filter_map(|target| match target {
+                Target::Star(hip) => self.star_by_hip(*hip),
+                _ => None,
+            })
             .collect()
     }
 
+    pub fn targets_at_pointer(&self) -> Vec<Target> {
+        self.pointer.hits.clone()
+    }
+
+    fn pointer_target_label(&self, target: &Target) -> String {
+        match target {
+            Target::Star(hip) => self
+                .star_by_hip(*hip)
+                .map(|star| star_aliases::display_name_for(star, self.config.language))
+                .unwrap_or_else(|| format!("HIP {hip}")),
+            Target::Planet(name) => (*name).to_string(),
+            Target::DeepSky(name) => self
+                .deep_sky_by_name(name)
+                .map(|object| {
+                    if object.common.is_empty() {
+                        object.name.to_string()
+                    } else {
+                        format!("{} · {}", object.name, object.common)
+                    }
+                })
+                .unwrap_or_else(|| (*name).to_string()),
+            Target::Constellation(code) => constellations::meta_for(code).en.to_string(),
+        }
+    }
+
+    #[cfg(test)]
     pub fn zoomed_visible_stars_for_current_view(
         &self,
         width: usize,
@@ -2490,8 +2562,8 @@ mod tests {
         app.pointer.y = target.y;
         app.update_pointer_hover();
         assert_eq!(app.selected_target, Some(Target::Star(target.star.hip)));
-        assert_eq!(app.pointer.hovered, Some(target.star.hip));
-        assert_eq!(app.pointer.hits, vec![target.star.hip]);
+        assert_eq!(app.pointer.hovered, Some(Target::Star(target.star.hip)));
+        assert_eq!(app.pointer.hits, vec![Target::Star(target.star.hip)]);
     }
 
     #[test]
@@ -2527,14 +2599,106 @@ mod tests {
         app.pointer.y = target.y;
         app.update_pointer_hover();
         assert!(app.pointer.hits.len() > 1);
-        assert_eq!(app.selected_target, app.pointer.hovered.map(Target::Star));
+        assert_eq!(app.selected_target, app.pointer.hovered.clone());
         let stars = app.stars_at_pointer();
-        assert_eq!(stars.len(), app.pointer.hits.len());
+        assert_eq!(
+            stars.len(),
+            app.pointer
+                .hits
+                .iter()
+                .filter(|target| matches!(target, Target::Star(_)))
+                .count()
+        );
         assert!(
             stars
                 .windows(2)
                 .all(|pair| pair[0].magnitude <= pair[1].magnitude)
         );
+    }
+
+    #[test]
+    fn pointer_hover_can_select_deep_sky_objects() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-pointer-deep-sky-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc.with_ymd_and_hms(2026, 5, 7, 14, 0, 0).unwrap()),
+        );
+        app.set_pointer_canvas(120, 36);
+        app.pointer.active = true;
+        let location = app.render_location();
+        let time = app.now();
+        let visible_stars = astro::visible_stars(
+            &app.catalog.stars,
+            &location,
+            time,
+            app.config.display.limiting_magnitude,
+            app.pointer.width,
+            app.pointer.height,
+        );
+        let visible_planets = planets::visible_planets(time)
+            .into_iter()
+            .filter_map(|planet| {
+                let horizontal = astro::horizontal_position(
+                    planet.ra_hours,
+                    planet.dec_degrees,
+                    &location,
+                    time,
+                );
+                astro::project_dome(
+                    horizontal.altitude,
+                    horizontal.azimuth,
+                    app.pointer.width,
+                    app.pointer.height,
+                )
+            })
+            .collect::<Vec<_>>();
+        let deep_sky_positions = app
+            .deep_sky
+            .iter()
+            .filter(|object| object.magnitude.unwrap_or(99.0) <= 9.5)
+            .filter_map(|object| {
+                let horizontal = astro::horizontal_position(
+                    object.ra_hours,
+                    object.dec_degrees,
+                    &location,
+                    time,
+                );
+                let (x, y) = astro::project_dome(
+                    horizontal.altitude,
+                    horizontal.azimuth,
+                    app.pointer.width,
+                    app.pointer.height,
+                )?;
+                Some((object.name, x, y))
+            })
+            .collect::<Vec<_>>();
+        let (name, x, y) = deep_sky_positions
+            .iter()
+            .find(|(_, x, y)| {
+                deep_sky_positions
+                    .iter()
+                    .filter(|(_, other_x, other_y)| other_x == x && other_y == y)
+                    .count()
+                    == 1
+                    && !visible_stars
+                        .iter()
+                        .any(|star| star.x == *x && star.y == *y)
+                    && !visible_planets
+                        .iter()
+                        .any(|(planet_x, planet_y)| planet_x == x && planet_y == y)
+            })
+            .copied()
+            .expect("a visible deep-sky object should have its own pointer cell");
+
+        app.pointer.x = x;
+        app.pointer.y = y;
+        app.update_pointer_hover();
+
+        assert!(app.pointer.hits.contains(&Target::DeepSky(name)));
+        assert_eq!(app.selected_target, Some(Target::DeepSky(name)));
     }
 
     #[test]

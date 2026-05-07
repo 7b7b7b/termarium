@@ -454,6 +454,10 @@ fn zoomed_sky_lines(
         unicode,
     );
 
+    if app.config.display.constellations {
+        draw_constellation_labels(&mut grid, visible, app, width, height, palette, unicode);
+    }
+
     label_cardinal_projected(&mut grid, 0.0, 'N', palette, |altitude, azimuth| {
         view.project_horizontal(altitude, azimuth)
     });
@@ -485,6 +489,17 @@ fn zoomed_sky_lines(
             );
         }
     }
+
+    draw_planet_labels(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+        },
+        palette,
+        unicode,
+    );
 
     if !app.pointer.active {
         draw_selected_label(
@@ -593,6 +608,10 @@ fn sky_lines(
         unicode,
     );
 
+    if app.config.display.constellations {
+        draw_constellation_labels(&mut grid, visible, app, width, height, palette, unicode);
+    }
+
     label_cardinal(&mut grid, width, height, 0.0, 'N', palette);
     label_cardinal(&mut grid, width, height, 90.0, 'E', palette);
     label_cardinal(&mut grid, width, height, 180.0, 'S', palette);
@@ -614,6 +633,17 @@ fn sky_lines(
             );
         }
     }
+
+    draw_planet_labels(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, location, time);
+            astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+        },
+        palette,
+        unicode,
+    );
 
     if !app.pointer.active {
         draw_selected_label(
@@ -775,8 +805,8 @@ fn draw_constellation_lines(
     grid: &mut [Vec<SkyCell>],
     visible: &[astro::VisibleStar],
     app: &App,
-    width: usize,
-    height: usize,
+    _width: usize,
+    _height: usize,
     palette: Palette,
     unicode: bool,
 ) {
@@ -803,15 +833,6 @@ fn draw_constellation_lines(
         } else {
             line_style
         };
-        let label_style = Style::default()
-            .fg(if highlighted {
-                palette.selected
-            } else {
-                palette.line
-            })
-            .bg(palette.bg)
-            .add_modifier(Modifier::BOLD);
-        let mut segments = 0usize;
         let mut endpoints = Vec::new();
 
         for pair in constellation.hips.windows(2) {
@@ -822,7 +843,6 @@ fn draw_constellation_lines(
                 continue;
             };
             draw_line(grid, x0, y0, x1, y1, line_style, unicode);
-            segments += 1;
             endpoints.push((x0, y0));
             endpoints.push((x1, y1));
         }
@@ -832,8 +852,55 @@ fn draw_constellation_lines(
         for &(x, y) in &endpoints {
             set_cell(grid, x, y, if unicode { '○' } else { 'o' }, joint_style);
         }
+    }
+}
 
-        if app.config.display.labels && segments > 0 && !endpoints.is_empty() {
+fn draw_constellation_labels(
+    grid: &mut [Vec<SkyCell>],
+    visible: &[astro::VisibleStar],
+    app: &App,
+    width: usize,
+    height: usize,
+    palette: Palette,
+    unicode: bool,
+) {
+    if !app.config.display.labels {
+        return;
+    }
+
+    let points = visible
+        .iter()
+        .map(|star| (star.star.hip, (star.x, star.y)))
+        .collect::<HashMap<_, _>>();
+    let selected = app.selected_constellation_code();
+
+    for constellation in &app.constellation_lines {
+        let highlighted =
+            selected.is_some_and(|code| code.eq_ignore_ascii_case(constellation.code));
+        let label_style = Style::default()
+            .fg(if highlighted {
+                palette.selected
+            } else {
+                palette.line
+            })
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD);
+        let mut endpoints = Vec::new();
+
+        for pair in constellation.hips.windows(2) {
+            let Some(&(x0, y0)) = points.get(&pair[0]) else {
+                continue;
+            };
+            let Some(&(x1, y1)) = points.get(&pair[1]) else {
+                continue;
+            };
+            endpoints.push((x0, y0));
+            endpoints.push((x1, y1));
+        }
+
+        endpoints.sort_unstable();
+        endpoints.dedup();
+        if !endpoints.is_empty() {
             let sum_x = endpoints.iter().map(|(x, _)| *x).sum::<usize>();
             let sum_y = endpoints.iter().map(|(_, y)| *y).sum::<usize>();
             let x = (sum_x / endpoints.len()).min(width.saturating_sub(1));
@@ -934,16 +1001,33 @@ fn draw_planets<F>(
                 .bg(palette.bg)
                 .add_modifier(Modifier::BOLD),
         );
-        if app.config.display.labels {
-            draw_text(
-                grid,
-                x.saturating_add(2),
-                y,
-                planet.name,
-                Style::default().fg(palette.moon).bg(palette.bg),
-                unicode,
-            );
-        }
+    }
+}
+
+fn draw_planet_labels<F>(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    mut project: F,
+    palette: Palette,
+    unicode: bool,
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
+    if !app.config.display.planets || !app.config.display.labels {
+        return;
+    }
+    for planet in planets::visible_planets(app.now()) {
+        let Some((x, y)) = project(planet.ra_hours, planet.dec_degrees) else {
+            continue;
+        };
+        draw_text(
+            grid,
+            x.saturating_add(2),
+            y,
+            planet.name,
+            Style::default().fg(palette.moon).bg(palette.bg),
+            unicode,
+        );
     }
 }
 
@@ -1272,7 +1356,7 @@ fn sunlight_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
 
 fn pointer_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
     let language = app.config.language;
-    let hits = app.stars_at_pointer();
+    let hits = app.targets_at_pointer();
     let mut lines = vec![
         Line::from(Span::styled(
             i18n::tr(language, "pointer"),
@@ -1298,11 +1382,11 @@ fn pointer_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 .fg(palette.cyan)
                 .add_modifier(Modifier::BOLD),
         )));
-        for (index, star) in hits.iter().take(4).enumerate() {
+        for (index, target) in hits.iter().take(4).enumerate() {
             if index > 0 {
                 lines.push(Line::from(""));
             }
-            push_star_summary(&mut lines, app, *star);
+            push_target_summary(&mut lines, app, target);
         }
         if hits.len() > 4 {
             lines.push(Line::from(format!("+{} more", hits.len() - 4)));
@@ -1341,6 +1425,64 @@ fn push_star_summary(lines: &mut Vec<Line<'static>>, app: &App, star: crate::cat
         "{}: {}",
         i18n::tr(language, "visible_state"),
         on_off(language, horizontal.altitude > 0.0)
+    )));
+}
+
+fn push_target_summary(lines: &mut Vec<Line<'static>>, app: &App, target: &Target) {
+    match target {
+        Target::Star(hip) => {
+            if let Some(star) = app.star_by_hip(*hip) {
+                push_star_summary(lines, app, star);
+            }
+        }
+        Target::Planet(name) => {
+            if let Some(planet) = app.planet_by_name(name) {
+                push_planet_summary(lines, app, planet);
+            }
+        }
+        Target::DeepSky(name) => {
+            if let Some(object) = app.deep_sky_by_name(name) {
+                push_deep_sky_summary(lines, app, object);
+            }
+        }
+        Target::Constellation(code) => {
+            let meta = constellations::meta_for(code);
+            lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
+            lines.push(Line::from(meta.zh.to_string()));
+        }
+    }
+}
+
+fn push_planet_summary(lines: &mut Vec<Line<'static>>, app: &App, planet: planets::Planet) {
+    push_position(lines, app, planet.name, planet.ra_hours, planet.dec_degrees);
+    lines.push(Line::from(format!("planet · mag {:.1}", planet.magnitude)));
+}
+
+fn push_deep_sky_summary(
+    lines: &mut Vec<Line<'static>>,
+    app: &App,
+    object: crate::deep_sky::DeepSkyObject,
+) {
+    let language = app.config.language;
+    let label = if object.common.is_empty() {
+        object.name.to_string()
+    } else {
+        format!("{} · {}", object.name, object.common)
+    };
+    push_position(lines, app, &label, object.ra_hours, object.dec_degrees);
+    lines.push(Line::from(format!(
+        "{} · mag {}",
+        object.kind,
+        object
+            .magnitude
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "?".to_string())
+    )));
+    let meta = constellations::meta_for(object.constellation);
+    lines.push(Line::from(format!(
+        "{}: {}",
+        i18n::tr(language, "constellation"),
+        meta.en
     )));
 }
 
