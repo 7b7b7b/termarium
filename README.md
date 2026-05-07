@@ -10,6 +10,13 @@ cargo install termarium
 termarium
 ```
 
+Or install the prebuilt binary through npm:
+
+```bash
+npm install -g termarium
+termarium
+```
+
 ## Features
 
 - Full-screen terminal UI built with Rust, Ratatui, and Crossterm
