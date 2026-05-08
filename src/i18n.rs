@@ -21,6 +21,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "planets") => "Planets",
         (Language::En, "labels") => "Labels",
         (Language::En, "side_panel") => "Side panel",
+        (Language::En, "landscape") => "Landscape",
+        (Language::En, "sky_orientation") => "Sky orientation",
         (Language::En, "on") => "on",
         (Language::En, "off") => "off",
         (Language::En, "live") => "live",
@@ -117,7 +119,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
             "q · g sky · / city · arrows rotate · s save · space · [/] · r · T/u/a · o · ?"
         }
         (Language::En, "help_body") => {
-            "Navigation\nq      quit; exit zoom first while zoomed\nEsc    clear selected target; quit if nothing is selected\ng      globe / sky flip\n←/→    switch city preset; rotate globe in Globe view\n↑/↓    rotate globe in Globe view\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      location setup; type on preset to search city; save Globe preview through setup\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, limiting magnitude."
+            "Navigation\nq      quit; exit zoom first while zoomed\nEsc    clear selected target; quit if nothing is selected\ng      globe / sky flip\n←/→    switch city preset; rotate globe in Globe view\n↑/↓    rotate globe in Globe view\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      location setup; type on preset to search city; save Globe preview through setup\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, landscape, sky orientation, limiting magnitude."
         }
         (Language::En, "new_moon") => "New Moon",
         (Language::En, "waxing_crescent") => "Waxing Crescent",
@@ -146,6 +148,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "planets") => "行星",
         (Language::Zh, "labels") => "星名",
         (Language::Zh, "side_panel") => "侧栏",
+        (Language::Zh, "landscape") => "地景",
+        (Language::Zh, "sky_orientation") => "星图方向",
         (Language::Zh, "on") => "开",
         (Language::Zh, "off") => "关",
         (Language::Zh, "live") => "实时",
@@ -240,7 +244,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
             "q · g 星空 · / 城市 · 方向键旋转 · s 保存 · space · [/] · r · T/u/a · o · ?"
         }
         (Language::Zh, "help_body") => {
-            "导航\nq      退出；放大时先退出放大\nEsc    取消选中目标；无选中目标时退出\ng      地球 / 星空翻转\n←/→    切换城市预设；地球视图中旋转地球\n↑/↓    地球视图中旋转地球\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      位置设置；在预设行输入可搜索城市；通过设置保存地球预览点\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、极限星等。"
+            "导航\nq      退出；放大时先退出放大\nEsc    取消选中目标；无选中目标时退出\ng      地球 / 星空翻转\n←/→    切换城市预设；地球视图中旋转地球\n↑/↓    地球视图中旋转地球\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      位置设置；在预设行输入可搜索城市；通过设置保存地球预览点\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、地景、星图方向、极限星等。"
         }
         (Language::Zh, "new_moon") => "新月",
         (Language::Zh, "waxing_crescent") => "蛾眉月",

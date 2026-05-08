@@ -95,6 +95,69 @@ impl Charset {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LandscapeMode {
+    Off,
+    #[default]
+    Horizon,
+    Bearings,
+}
+
+impl LandscapeMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Horizon,
+            Self::Horizon => Self::Bearings,
+            Self::Bearings => Self::Off,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Horizon => "horizon",
+            Self::Bearings => "bearings",
+        }
+    }
+}
+
+impl fmt::Display for LandscapeMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkyOrientation {
+    #[default]
+    Observer,
+    Map,
+}
+
+impl SkyOrientation {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Observer => Self::Map,
+            Self::Map => Self::Observer,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Observer => "observer",
+            Self::Map => "map",
+        }
+    }
+}
+
+impl fmt::Display for SkyOrientation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u8,
@@ -131,6 +194,10 @@ pub struct DisplayConfig {
     pub deep_sky: bool,
     #[serde(default = "default_true")]
     pub side_panel: bool,
+    #[serde(default = "default_landscape")]
+    pub landscape: LandscapeMode,
+    #[serde(default = "default_sky_orientation")]
+    pub sky_orientation: SkyOrientation,
 }
 
 impl Default for Config {
@@ -155,9 +222,19 @@ impl Default for Config {
                 planets: true,
                 deep_sky: true,
                 side_panel: true,
+                landscape: LandscapeMode::Horizon,
+                sky_orientation: SkyOrientation::Observer,
             },
         }
     }
+}
+
+fn default_landscape() -> LandscapeMode {
+    LandscapeMode::Horizon
+}
+
+fn default_sky_orientation() -> SkyOrientation {
+    SkyOrientation::Observer
 }
 
 fn default_constellations() -> bool {
@@ -235,6 +312,48 @@ mod tests {
     #[test]
     fn default_config_is_valid() {
         Config::default().validate().unwrap();
+    }
+
+    #[test]
+    fn default_landscape_is_horizon() {
+        assert_eq!(Config::default().display.landscape, LandscapeMode::Horizon);
+    }
+
+    #[test]
+    fn default_sky_orientation_is_observer() {
+        assert_eq!(
+            Config::default().display.sky_orientation,
+            SkyOrientation::Observer
+        );
+    }
+
+    #[test]
+    fn old_config_without_landscape_or_orientation_uses_new_defaults() {
+        let raw = r#"{
+            "version": 3,
+            "language": "en",
+            "location": {
+                "name": "Shanghai",
+                "latitude": 31.2304,
+                "longitude": 121.4737,
+                "timezone": "Asia/Shanghai"
+            },
+            "display": {
+                "limiting_magnitude": 5.8,
+                "labels": true,
+                "moon_panel": true,
+                "constellations": true,
+                "theme": "midnight",
+                "charset": "auto",
+                "animations": true,
+                "planets": true,
+                "deep_sky": true,
+                "side_panel": true
+            }
+        }"#;
+        let config: Config = serde_json::from_str(raw).unwrap();
+        assert_eq!(config.display.landscape, LandscapeMode::Horizon);
+        assert_eq!(config.display.sky_orientation, SkyOrientation::Observer);
     }
 
     #[test]

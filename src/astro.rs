@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use crate::{catalog::Star, config::Location};
+use crate::{
+    catalog::Star,
+    config::{Location, SkyOrientation},
+};
 
 const SYNODIC_MONTH_DAYS: f64 = 29.530_588_853;
 const KNOWN_NEW_MOON_JD: f64 = 2_451_550.259_72;
@@ -33,13 +36,39 @@ pub fn visible_stars(
     width: usize,
     height: usize,
 ) -> Vec<VisibleStar> {
+    visible_stars_for_orientation(
+        stars,
+        location,
+        time,
+        limiting_magnitude,
+        width,
+        height,
+        SkyOrientation::Observer,
+    )
+}
+
+pub fn visible_stars_for_orientation(
+    stars: &[Star],
+    location: &Location,
+    time: DateTime<Utc>,
+    limiting_magnitude: f64,
+    width: usize,
+    height: usize,
+    orientation: SkyOrientation,
+) -> Vec<VisibleStar> {
     let mut visible = stars
         .iter()
         .copied()
         .filter(|star| star.magnitude <= limiting_magnitude)
         .filter_map(|star| {
             let horizontal = horizontal_position(star.ra_hours, star.dec_degrees, location, time);
-            let (x, y) = project_dome(horizontal.altitude, horizontal.azimuth, width, height)?;
+            let (x, y) = project_dome_for_orientation(
+                horizontal.altitude,
+                horizontal.azimuth,
+                width,
+                height,
+                orientation,
+            )?;
             Some(VisibleStar { star, x, y })
         })
         .collect::<Vec<_>>();
@@ -84,6 +113,16 @@ pub fn project_dome(
     width: usize,
     height: usize,
 ) -> Option<(usize, usize)> {
+    project_dome_for_orientation(altitude, azimuth, width, height, SkyOrientation::Observer)
+}
+
+pub fn project_dome_for_orientation(
+    altitude: f64,
+    azimuth: f64,
+    width: usize,
+    height: usize,
+    orientation: SkyOrientation,
+) -> Option<(usize, usize)> {
     if altitude < 0.0 || width == 0 || height == 0 {
         return None;
     }
@@ -94,7 +133,11 @@ pub fn project_dome(
     let x_radius = center_x.max(1.0);
     let y_radius = center_y.max(1.0);
     let az = azimuth.to_radians();
-    let x = center_x + az.sin() * radius * x_radius;
+    let east_sign = match orientation {
+        SkyOrientation::Observer => -1.0,
+        SkyOrientation::Map => 1.0,
+    };
+    let x = center_x + east_sign * az.sin() * radius * x_radius;
     let y = center_y - az.cos() * radius * y_radius;
 
     if !x.is_finite() || !y.is_finite() {
@@ -171,6 +214,28 @@ mod tests {
                 assert!(y < 24);
             }
         }
+    }
+
+    #[test]
+    fn default_projection_places_east_on_left_for_observer_view() {
+        let center_x = 40;
+        let (east_x, _) = project_dome(0.0, 90.0, 81, 25).unwrap();
+        let (west_x, _) = project_dome(0.0, 270.0, 81, 25).unwrap();
+
+        assert!(east_x < center_x);
+        assert!(west_x > center_x);
+    }
+
+    #[test]
+    fn map_projection_places_east_on_right() {
+        let center_x = 40;
+        let (east_x, _) =
+            project_dome_for_orientation(0.0, 90.0, 81, 25, SkyOrientation::Map).unwrap();
+        let (west_x, _) =
+            project_dome_for_orientation(0.0, 270.0, 81, 25, SkyOrientation::Map).unwrap();
+
+        assert!(east_x > center_x);
+        assert!(west_x < center_x);
     }
 
     #[test]
