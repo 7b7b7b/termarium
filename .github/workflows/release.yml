@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -74,6 +74,8 @@ jobs:
     name: Publish Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
@@ -101,3 +103,35 @@ jobs:
             release-assets/termarium-*.tar.gz
             release-assets/termarium-*.zip
             release-assets/SHA256SUMS
+
+  publish-npm:
+    name: Publish npm package
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$package_version" != "$tag_version" ]; then
+            echo "package.json version $package_version does not match tag $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        run: npm publish --access public
