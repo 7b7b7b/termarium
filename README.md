@@ -30,6 +30,8 @@ Linux x64, and Windows x64.
 - Time travel, city tour, alias-aware target search, constellation highlight, and tonight panel
 - Crosshair pointer mode for selecting visible stars directly from the sky map
 - Globe view with offline Blue Marble terrain colors, daylight shading, city labels, rotating preview, and horizon flip animation
+- Optional horizon and bearing-oriented ground landscape modes
+- Configurable sky orientation: observer view defaults to east on the left and west on the right, with a map-style option
 - Offline low-precision Venus, Mars, Jupiter, and Saturn positions
 - Sun altitude, daylight/twilight state, sunset, and next sunrise
 - First-run city search on the globe, plus setup for custom coordinates and timezone
@@ -92,6 +94,8 @@ l       toggle labels
 c       toggle constellation lines
 + / -   adjust limiting magnitude
 ```
+
+Landscape mode and sky orientation are available from the settings panel.
 
 Search accepts proper names, curated aliases, HIP/HD-style identifiers, western
 constellation names, Chinese constellation names, planets, and Messier objects.

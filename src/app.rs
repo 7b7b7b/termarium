@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::{
     astro,
     catalog::{Catalog, Star},
-    config::{self, Config, Language, Location},
+    config::{self, Config, Language, Location, SkyOrientation},
     constellations::{self, ConstellationLine},
     deep_sky::{self, DeepSkyObject},
     i18n, planets, star_aliases,
@@ -687,6 +687,7 @@ pub(crate) struct SkyViewMapper {
     source_height: usize,
     width: usize,
     height: usize,
+    orientation: SkyOrientation,
 }
 
 #[derive(Debug, Clone)]
@@ -1112,7 +1113,9 @@ impl App {
             7 => self.config.display.labels = !self.config.display.labels,
             8 => self.config.display.constellations = !self.config.display.constellations,
             9 => self.config.display.side_panel = !self.config.display.side_panel,
-            10 => {
+            10 => self.config.display.landscape = self.config.display.landscape.next(),
+            11 => self.config.display.sky_orientation = self.config.display.sky_orientation.next(),
+            12 => {
                 let delta = if forward { 0.1 } else { -0.1 };
                 self.config.display.limiting_magnitude =
                     (self.config.display.limiting_magnitude + delta).clamp(-1.5, 6.0);
@@ -2270,13 +2273,14 @@ impl App {
         let visible = if let Some(view) = zoom_view.as_ref() {
             view.stars.clone()
         } else {
-            astro::visible_stars(
+            astro::visible_stars_for_orientation(
                 &self.catalog.stars,
                 &location,
                 time,
                 self.config.display.limiting_magnitude,
                 width,
                 height,
+                self.config.display.sky_orientation,
             )
         };
 
@@ -2302,7 +2306,13 @@ impl App {
                 let projected = if let Some(view) = zoom_view.as_ref() {
                     view.project_horizontal(horizontal.altitude, horizontal.azimuth)
                 } else {
-                    astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+                    astro::project_dome_for_orientation(
+                        horizontal.altitude,
+                        horizontal.azimuth,
+                        width,
+                        height,
+                        self.config.display.sky_orientation,
+                    )
                 };
                 if let Some((x, y)) = projected {
                     targets.push(ProjectedTarget {
@@ -2330,7 +2340,13 @@ impl App {
                 let projected = if let Some(view) = zoom_view.as_ref() {
                     view.project_horizontal(horizontal.altitude, horizontal.azimuth)
                 } else {
-                    astro::project_dome(horizontal.altitude, horizontal.azimuth, width, height)
+                    astro::project_dome_for_orientation(
+                        horizontal.altitude,
+                        horizontal.azimuth,
+                        width,
+                        height,
+                        self.config.display.sky_orientation,
+                    )
                 };
                 if let Some((x, y)) = projected {
                     targets.push(ProjectedTarget {
@@ -2426,16 +2442,25 @@ impl App {
         let source_width = width.saturating_mul(4).max(width).max(1);
         let source_height = height.saturating_mul(4).max(height).max(1);
         let location = self.render_location();
-        let source_visible = astro::visible_stars(
+        let orientation = self.config.display.sky_orientation;
+        let source_visible = astro::visible_stars_for_orientation(
             &self.catalog.stars,
             &location,
             self.now(),
             6.0,
             source_width,
             source_height,
+            orientation,
         );
         let viewport = self.current_zoom_viewport(&source_visible, source_width, source_height)?;
-        let mapper = SkyViewMapper::new(viewport, source_width, source_height, width, height);
+        let mapper = SkyViewMapper::new(
+            viewport,
+            source_width,
+            source_height,
+            width,
+            height,
+            orientation,
+        );
         Some(ZoomRenderView {
             stars: map_zoomed_visible(source_visible, mapper),
             mapper,
@@ -2498,13 +2523,14 @@ impl App {
                 ..
             }) => {
                 let full_bounds = ZoomBounds::full(source_width, source_height);
-                let from_visible = astro::visible_stars(
+                let from_visible = astro::visible_stars_for_orientation(
                     &self.catalog.stars,
                     from,
                     self.now(),
                     6.0,
                     source_width,
                     source_height,
+                    self.config.display.sky_orientation,
                 );
                 let target_bounds = self
                     .constellation_zoom_bounds(&from_visible, code, source_width, source_height)
@@ -2669,6 +2695,7 @@ impl SkyViewMapper {
         source_height: usize,
         width: usize,
         height: usize,
+        orientation: SkyOrientation,
     ) -> Self {
         Self {
             viewport,
@@ -2676,6 +2703,7 @@ impl SkyViewMapper {
             source_height,
             width,
             height,
+            orientation,
         }
     }
 
@@ -2686,7 +2714,13 @@ impl SkyViewMapper {
     }
 
     fn project_horizontal(self, altitude: f64, azimuth: f64) -> Option<(usize, usize)> {
-        let (x, y) = astro::project_dome(altitude, azimuth, self.source_width, self.source_height)?;
+        let (x, y) = astro::project_dome_for_orientation(
+            altitude,
+            azimuth,
+            self.source_width,
+            self.source_height,
+            self.orientation,
+        )?;
         self.map_source(x, y)
     }
 }
@@ -2907,13 +2941,13 @@ fn next_position(current: Option<usize>, len: usize, forward: bool) -> usize {
 }
 
 pub fn settings_count() -> usize {
-    11
+    13
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DisplayConfig;
+    use crate::config::{DisplayConfig, LandscapeMode, SkyOrientation};
     use chrono::TimeZone;
 
     fn test_app(location: Location) -> App {
@@ -2933,6 +2967,8 @@ mod tests {
                     planets: true,
                     deep_sky: true,
                     side_panel: true,
+                    landscape: LandscapeMode::Horizon,
+                    sky_orientation: SkyOrientation::Observer,
                 },
             },
             PathBuf::from("/tmp/termarium-test-city-config.json"),
@@ -3518,6 +3554,42 @@ mod tests {
     }
 
     #[test]
+    fn landscape_setting_cycles_modes() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.screen = Screen::Settings;
+        app.settings.selected = 10;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.landscape, LandscapeMode::Bearings);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.landscape, LandscapeMode::Off);
+    }
+
+    #[test]
+    fn sky_orientation_setting_cycles_modes() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.screen = Screen::Settings;
+        app.settings.selected = 11;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.sky_orientation, SkyOrientation::Map);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.sky_orientation, SkyOrientation::Observer);
+    }
+
+    #[test]
     fn constellation_zoom_toggles_and_survives_tab_cycle() {
         let mut app = App::new(
             Config::default(),
@@ -3729,6 +3801,42 @@ mod tests {
             app.pointer.width,
             app.pointer.height,
         );
+        let deep_sky_cells = app
+            .deep_sky
+            .iter()
+            .filter(|object| object.magnitude.unwrap_or(99.0) <= 9.5)
+            .filter_map(|object| {
+                let horizontal = astro::horizontal_position(
+                    object.ra_hours,
+                    object.dec_degrees,
+                    &app.config.location,
+                    app.now(),
+                );
+                astro::project_dome(
+                    horizontal.altitude,
+                    horizontal.azimuth,
+                    app.pointer.width,
+                    app.pointer.height,
+                )
+            })
+            .collect::<Vec<_>>();
+        let planet_cells = planets::visible_planets(app.now())
+            .into_iter()
+            .filter_map(|planet| {
+                let horizontal = astro::horizontal_position(
+                    planet.ra_hours,
+                    planet.dec_degrees,
+                    &app.config.location,
+                    app.now(),
+                );
+                astro::project_dome(
+                    horizontal.altitude,
+                    horizontal.azimuth,
+                    app.pointer.width,
+                    app.pointer.height,
+                )
+            })
+            .collect::<Vec<_>>();
         let target = visible
             .iter()
             .find(|candidate| {
@@ -3737,6 +3845,12 @@ mod tests {
                     .filter(|other| other.x == candidate.x && other.y == candidate.y)
                     .count()
                     == 1
+                    && !deep_sky_cells
+                        .iter()
+                        .any(|(x, y)| *x == candidate.x && *y == candidate.y)
+                    && !planet_cells
+                        .iter()
+                        .any(|(x, y)| *x == candidate.x && *y == candidate.y)
             })
             .unwrap();
         app.pointer.x = target.x;
