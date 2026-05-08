@@ -24,9 +24,11 @@ const TIME_SHIFT_HOLD_WINDOW: StdDuration = StdDuration::from_millis(180);
 const TIME_REPEAT_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(160);
 const SETUP_PRESET_FIELD: usize = 0;
 const SETUP_SAVE_FIELD: usize = 1;
-const HORIZON_TRANSITION_DURATION: StdDuration = StdDuration::from_secs(2);
+const HORIZON_TRANSITION_DURATION: StdDuration = StdDuration::from_secs(3);
 const GROUND_LAT_STEP: f64 = 2.5;
-const GROUND_LON_STEP: f64 = 5.0;
+const GROUND_LON_STEP: f64 = 2.5;
+const GROUND_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
+const GROUND_FAST_STEP: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -543,6 +545,7 @@ pub enum Target {
     Constellation(String),
     Planet(&'static str),
     DeepSky(&'static str),
+    City(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -552,11 +555,40 @@ pub struct SearchResult {
     pub target: Target,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    #[default]
+    Sky,
+    City,
+}
+
+#[derive(Debug, Clone)]
 pub struct SearchState {
     pub query: String,
     pub results: Vec<SearchResult>,
     pub selected: usize,
+    pub mode: SearchMode,
+}
+
+impl SearchState {
+    fn new(mode: SearchMode, language: Language) -> Self {
+        let results = match mode {
+            SearchMode::Sky => Vec::new(),
+            SearchMode::City => city_search_results("", language),
+        };
+        Self {
+            query: String::new(),
+            results,
+            selected: 0,
+            mode,
+        }
+    }
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self::new(SearchMode::Sky, Language::En)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -680,8 +712,10 @@ pub struct App {
     pub opening_ticks: u8,
     last_pointer_move: Option<(KeyCode, Instant)>,
     last_time_shift: Option<(KeyCode, Instant)>,
+    last_ground_move: Option<(KeyCode, Instant)>,
     sky_transition: Option<SkyTransition>,
     horizon_transition: Option<HorizonTransition>,
+    pending_ground_transition: bool,
 }
 
 impl App {
@@ -696,21 +730,33 @@ impl App {
         let setup = SetupState::from_location(&config.location);
         let ground = GroundState::from_location(&config.location);
         let time_base = time_override.unwrap_or_else(Utc::now);
+        let language = config.language;
+        let screen = if start_setup {
+            Screen::Search
+        } else {
+            Screen::Sky
+        };
+        let view_mode = if start_setup {
+            ViewMode::Ground
+        } else {
+            ViewMode::Sky
+        };
+        let search = if start_setup {
+            SearchState::new(SearchMode::City, language)
+        } else {
+            SearchState::default()
+        };
         Self {
             config,
             config_path,
             catalog,
             constellation_lines: constellations::load(),
             deep_sky: deep_sky::load(),
-            screen: if start_setup {
-                Screen::Setup
-            } else {
-                Screen::Sky
-            },
-            view_mode: ViewMode::Sky,
+            screen,
+            view_mode,
             setup,
             settings: SettingsState::default(),
-            search: SearchState::default(),
+            search,
             pointer: PointerState::default(),
             ground,
             session_location: None,
@@ -731,8 +777,10 @@ impl App {
             opening_ticks: 0,
             last_pointer_move: None,
             last_time_shift: None,
+            last_ground_move: None,
             sky_transition: None,
             horizon_transition: None,
+            pending_ground_transition: false,
         }
     }
 
@@ -768,7 +816,10 @@ impl App {
             .is_some_and(|transition| transition.is_finished())
         {
             self.sky_transition = None;
-            if self.pointer.active {
+            if self.pending_ground_transition {
+                self.pending_ground_transition = false;
+                self.enter_ground_view(ViewMode::Sky);
+            } else if self.pointer.active {
                 self.update_pointer_hover();
             }
         }
@@ -866,6 +917,7 @@ impl App {
                     self.constellation_zoom = false;
                     self.constellation_zoom_code = None;
                     self.sky_transition = None;
+                    self.pending_ground_transition = false;
                     self.message = i18n::tr(self.config.language, "selection_cleared").to_string();
                 } else {
                     self.should_quit = true;
@@ -875,8 +927,7 @@ impl App {
                 self.open_setup_from(self.active_location().clone());
             }
             KeyCode::Char('/') => {
-                self.search = SearchState::default();
-                self.screen = Screen::Search;
+                self.open_sky_search();
             }
             KeyCode::Char('o') => {
                 self.screen = Screen::Settings;
@@ -952,10 +1003,23 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.should_quit = true,
             KeyCode::Char('g') => self.toggle_ground_sky(),
             KeyCode::Char('s') => self.open_setup_from(self.ground.preview_location.clone()),
-            KeyCode::Left => self.move_ground_cursor(-GROUND_LON_STEP, 0.0),
-            KeyCode::Right => self.move_ground_cursor(GROUND_LON_STEP, 0.0),
-            KeyCode::Up => self.move_ground_cursor(0.0, GROUND_LAT_STEP),
-            KeyCode::Down => self.move_ground_cursor(0.0, -GROUND_LAT_STEP),
+            KeyCode::Char('/') => self.open_city_search(),
+            KeyCode::Left => {
+                let step = self.ground_move_step(key);
+                self.move_ground_cursor(-GROUND_LON_STEP * step, 0.0);
+            }
+            KeyCode::Right => {
+                let step = self.ground_move_step(key);
+                self.move_ground_cursor(GROUND_LON_STEP * step, 0.0);
+            }
+            KeyCode::Up => {
+                let step = self.ground_move_step(key);
+                self.move_ground_cursor(0.0, GROUND_LAT_STEP * step);
+            }
+            KeyCode::Down => {
+                let step = self.ground_move_step(key);
+                self.move_ground_cursor(0.0, -GROUND_LAT_STEP * step);
+            }
             KeyCode::Char(' ') => self.toggle_pause(),
             KeyCode::Char('[') => self.shift_hour_time(key, Duration::hours(-1)),
             KeyCode::Char(']') => self.shift_hour_time(key, Duration::hours(1)),
@@ -1027,25 +1091,35 @@ impl App {
 
     fn handle_search_key(&mut self, key: KeyEvent) -> io::Result<()> {
         match key.code {
-            KeyCode::Esc => self.screen = Screen::Sky,
+            KeyCode::Esc => {
+                if self.search.mode == SearchMode::City && !self.can_cancel_setup {
+                    self.should_quit = true;
+                } else {
+                    self.screen = Screen::Sky;
+                }
+            }
             KeyCode::Enter => {
                 if let Some(result) = self.search.results.get(self.search.selected).cloned() {
-                    if !matches!(result.target, Target::Constellation(_)) {
-                        self.constellation_zoom = false;
-                        self.constellation_zoom_code = None;
-                        self.sky_transition = None;
-                    } else if self.constellation_zoom {
-                        if let Target::Constellation(code) = &result.target {
-                            if let Some(from_code) =
-                                self.selected_constellation_code().map(ToString::to_string)
-                            {
-                                self.start_zoom_transition(from_code, code.clone());
+                    if let Target::City(index) = result.target {
+                        self.apply_ground_city(index)?;
+                    } else {
+                        if !matches!(result.target, Target::Constellation(_)) {
+                            self.constellation_zoom = false;
+                            self.constellation_zoom_code = None;
+                            self.sky_transition = None;
+                        } else if self.constellation_zoom {
+                            if let Target::Constellation(code) = &result.target {
+                                if let Some(from_code) =
+                                    self.selected_constellation_code().map(ToString::to_string)
+                                {
+                                    self.start_zoom_transition(from_code, code.clone());
+                                }
+                                self.constellation_zoom_code = Some(code.clone());
                             }
-                            self.constellation_zoom_code = Some(code.clone());
                         }
+                        self.selected_target = Some(result.target);
+                        self.message = result.label;
                     }
-                    self.selected_target = Some(result.target);
-                    self.message = result.label;
                 }
                 self.screen = Screen::Sky;
             }
@@ -1127,6 +1201,16 @@ impl App {
         self.setup = SetupState::from_location(&location);
         self.screen = Screen::Setup;
         self.message.clear();
+    }
+
+    fn open_sky_search(&mut self) {
+        self.search = SearchState::new(SearchMode::Sky, self.config.language);
+        self.screen = Screen::Search;
+    }
+
+    fn open_city_search(&mut self) {
+        self.search = SearchState::new(SearchMode::City, self.config.language);
+        self.screen = Screen::Search;
     }
 
     fn cycle_preset(&mut self, forward: bool) {
@@ -1254,12 +1338,7 @@ impl App {
     fn apply_preset(&mut self, index: usize, persist: bool) -> io::Result<()> {
         let preset = PRESETS[index];
         let from_location = self.config.location.clone();
-        let to_location = Location {
-            name: preset.en.to_string(),
-            latitude: preset.latitude,
-            longitude: preset.longitude,
-            timezone: preset.timezone.to_string(),
-        };
+        let to_location = location_for_preset(preset);
         let hidden_zoom_code = self
             .constellation_zoom
             .then(|| self.selected_constellation_code().map(ToString::to_string))
@@ -1285,6 +1364,51 @@ impl App {
         self.ground = GroundState::from_location(&self.config.location);
         self.setup = SetupState::from_location(&self.config.location);
         if persist { self.save() } else { Ok(()) }
+    }
+
+    fn apply_ground_city(&mut self, index: usize) -> io::Result<()> {
+        let Some(preset) = PRESETS.get(index).copied().filter(|preset| !preset.custom) else {
+            return Ok(());
+        };
+        let location = location_for_preset(preset);
+        let first_location_pick = !self.can_cancel_setup;
+        self.stop_tour_without_restore();
+        self.pointer.active = false;
+        self.last_pointer_move = None;
+        self.last_ground_move = None;
+        self.view_mode = ViewMode::Ground;
+        self.ground = GroundState::from_location(&location);
+        self.setup = SetupState::from_location(&location);
+        self.horizon_transition = None;
+        self.sky_transition = None;
+        self.pending_ground_transition = false;
+        self.selected_target = None;
+
+        if first_location_pick {
+            let previous = self.config.location.clone();
+            self.config.location = location.clone();
+            if let Err(err) = self.config.validate() {
+                self.config.location = previous;
+                self.message = err;
+                return Ok(());
+            }
+            self.session_location = None;
+            self.can_cancel_setup = true;
+            self.save()?;
+            self.message = format!(
+                "{}: {}",
+                i18n::tr(self.config.language, "saved"),
+                preset_display_name(preset, self.config.language)
+            );
+        } else {
+            self.session_location = Some(location.clone());
+            self.message = format!(
+                "{}: {}",
+                i18n::tr(self.config.language, "ground_cursor"),
+                preset_display_name(preset, self.config.language)
+            );
+        }
+        Ok(())
     }
 
     fn toggle_pause(&mut self) {
@@ -1386,7 +1510,10 @@ impl App {
     }
 
     fn refresh_search(&mut self) {
-        self.search.results = self.search_results(&self.search.query);
+        self.search.results = match self.search.mode {
+            SearchMode::Sky => self.search_results(&self.search.query),
+            SearchMode::City => city_search_results(&self.search.query, self.config.language),
+        };
         self.search.selected = self
             .search
             .selected
@@ -1685,26 +1812,52 @@ impl App {
         let from = self.view_mode;
         match self.view_mode {
             ViewMode::Sky => {
-                self.pointer.active = false;
-                self.last_pointer_move = None;
-                self.ground = GroundState::from_location(self.active_location());
-                self.view_mode = ViewMode::Ground;
-                self.message = i18n::tr(self.config.language, "ground_mode").to_string();
+                if self.config.display.animations && self.constellation_zoom {
+                    let code = self.selected_constellation_code().map(ToString::to_string);
+                    self.pointer.active = false;
+                    self.last_pointer_move = None;
+                    self.constellation_zoom = false;
+                    self.constellation_zoom_code = None;
+                    self.pending_ground_transition = code.is_some();
+                    if let Some(code) = code {
+                        self.start_zoom_out_transition(code);
+                    } else {
+                        self.enter_ground_view(from);
+                    }
+                    self.message = i18n::tr(self.config.language, "ground_mode").to_string();
+                    return;
+                }
+                self.enter_ground_view(from);
             }
             ViewMode::Ground => {
                 self.session_location = Some(self.ground.preview_location.clone());
                 self.constellation_zoom = false;
                 self.constellation_zoom_code = None;
                 self.sky_transition = None;
+                self.pending_ground_transition = false;
                 self.view_mode = ViewMode::Sky;
                 self.message = i18n::tr(self.config.language, "sky_mode").to_string();
+                self.start_horizon_transition(from, self.view_mode);
             }
         }
+    }
 
+    fn enter_ground_view(&mut self, from: ViewMode) {
+        self.pointer.active = false;
+        self.last_pointer_move = None;
+        self.constellation_zoom = false;
+        self.constellation_zoom_code = None;
+        self.ground = GroundState::from_location(self.active_location());
+        self.view_mode = ViewMode::Ground;
+        self.message = i18n::tr(self.config.language, "ground_mode").to_string();
+        self.start_horizon_transition(from, self.view_mode);
+    }
+
+    fn start_horizon_transition(&mut self, from: ViewMode, to: ViewMode) {
         if self.config.display.animations {
             self.horizon_transition = Some(HorizonTransition {
                 from,
-                to: self.view_mode,
+                to,
                 started: Instant::now(),
                 duration: HORIZON_TRANSITION_DURATION,
             });
@@ -1723,6 +1876,20 @@ impl App {
             self.ground.cursor_lat,
             self.ground.cursor_lon
         );
+    }
+
+    fn ground_move_step(&mut self, key: KeyEvent) -> f64 {
+        let now = Instant::now();
+        let is_fast_repeat = matches!(key.kind, KeyEventKind::Repeat)
+            || self.last_ground_move.is_some_and(|(code, at)| {
+                code == key.code && now.duration_since(at) <= GROUND_HOLD_WINDOW
+            });
+        self.last_ground_move = Some((key.code, now));
+        if is_fast_repeat {
+            GROUND_FAST_STEP
+        } else {
+            1.0
+        }
     }
 
     fn pointer_move_step(&mut self, key: KeyEvent) -> isize {
@@ -2048,6 +2215,10 @@ impl App {
                 })
                 .unwrap_or_else(|| (*name).to_string()),
             Target::Constellation(code) => constellations::meta_for(code).en.to_string(),
+            Target::City(index) => PRESETS
+                .get(*index)
+                .map(|preset| preset.en.to_string())
+                .unwrap_or_else(|| "city".to_string()),
         }
     }
 
@@ -2426,6 +2597,15 @@ fn map_preview_location(latitude: f64, longitude: f64) -> Location {
     }
 }
 
+fn location_for_preset(preset: Preset) -> Location {
+    Location {
+        name: preset.en.to_string(),
+        latitude: preset.latitude,
+        longitude: preset.longitude,
+        timezone: preset.timezone.to_string(),
+    }
+}
+
 fn approximate_timezone(longitude: f64) -> String {
     let offset = (longitude / 15.0).round().clamp(-12.0, 12.0) as i32;
     match offset.cmp(&0) {
@@ -2464,6 +2644,37 @@ fn city_matches_query(preset: &Preset, query: &str) -> bool {
                     .collect::<String>()
                     .contains(&compact_needle))
     })
+}
+
+fn city_search_results(query: &str, language: Language) -> Vec<SearchResult> {
+    let query = query.trim();
+    PRESETS
+        .iter()
+        .enumerate()
+        .filter(|(_, preset)| !preset.custom)
+        .filter(|(_, preset)| query.is_empty() || city_matches_query(preset, query))
+        .map(|(index, preset)| {
+            let label = match language {
+                Language::En => preset.en.to_string(),
+                Language::Zh => preset.zh.to_string(),
+            };
+            SearchResult {
+                label,
+                detail: format!(
+                    "{} · {:+.4} {:+.4} · {}",
+                    preset.en, preset.latitude, preset.longitude, preset.timezone
+                ),
+                target: Target::City(index),
+            }
+        })
+        .collect()
+}
+
+fn preset_display_name(preset: Preset, language: Language) -> &'static str {
+    match language {
+        Language::En => preset.en,
+        Language::Zh => preset.zh,
+    }
 }
 
 fn current_preset_index(location: &Location) -> Option<usize> {
@@ -2599,6 +2810,24 @@ mod tests {
     }
 
     #[test]
+    fn first_start_opens_ground_city_search() {
+        let app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-first-ground-search-config.json"),
+            Catalog { stars: Vec::new() },
+            true,
+            false,
+            Some(Utc::now()),
+        );
+
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert_eq!(app.screen, Screen::Search);
+        assert_eq!(app.search.mode, SearchMode::City);
+        assert!(!app.search.results.is_empty());
+        assert!(!app.can_cancel_setup);
+    }
+
+    #[test]
     fn ground_toggle_starts_and_finishes_horizon_transition() {
         let mut app = test_app(Location {
             name: "Shanghai".to_string(),
@@ -2627,6 +2856,50 @@ mod tests {
     }
 
     #[test]
+    fn ground_toggle_from_zoomed_sky_zooms_out_before_horizon_transition() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-zoom-to-ground-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        let code = app.selected_constellation_code().unwrap().to_string();
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+
+        assert_eq!(app.view_mode, ViewMode::Sky);
+        assert!(!app.constellation_zoom);
+        assert!(app.pending_ground_transition);
+        assert!(app.horizon_transition().is_none());
+        assert!(matches!(
+            app.sky_transition.as_ref(),
+            Some(SkyTransition {
+                kind: SkyTransitionKind::ZoomOut {
+                    code: transition_code,
+                },
+                ..
+            }) if transition_code == &code
+        ));
+        assert!(app.should_render_zoomed_sky());
+
+        if let Some(transition) = app.sky_transition.as_mut() {
+            transition.started = Instant::now() - SKY_TRANSITION_DURATION;
+        }
+        app.tick();
+
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert!(!app.pending_ground_transition);
+        assert!(app.sky_transition.is_none());
+        assert!(matches!(
+            app.horizon_transition(),
+            Some((ViewMode::Sky, ViewMode::Ground, _))
+        ));
+    }
+
+    #[test]
     fn ground_arrows_move_preview_without_saving_config_location() {
         let mut app = test_app(Location {
             name: "Shanghai".to_string(),
@@ -2647,6 +2920,58 @@ mod tests {
             app.ground.preview_location.latitude,
             app.config.location.latitude
         );
+    }
+
+    #[test]
+    fn ground_city_search_jumps_preview_without_saving_existing_config() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('/'))).unwrap();
+        for ch in "lon".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch))).unwrap();
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert_eq!(app.screen, Screen::Sky);
+        assert_eq!(app.ground.preview_location.name, "London");
+        assert_eq!(app.ground.preview_location.timezone, "Europe/London");
+        assert_eq!(app.config.location.name, "Shanghai");
+        assert_eq!(
+            app.session_location
+                .as_ref()
+                .map(|location| location.name.as_str()),
+            Some("London")
+        );
+    }
+
+    #[test]
+    fn first_start_city_search_saves_selected_city() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-first-city-save-config.json"),
+            Catalog { stars: Vec::new() },
+            true,
+            false,
+            Some(Utc::now()),
+        );
+
+        for ch in "lon".chars() {
+            app.handle_key(KeyEvent::from(KeyCode::Char(ch))).unwrap();
+        }
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert_eq!(app.screen, Screen::Sky);
+        assert_eq!(app.config.location.name, "London");
+        assert!(app.session_location.is_none());
+        assert!(app.can_cancel_setup);
     }
 
     #[test]
@@ -3076,6 +3401,9 @@ mod tests {
         );
         app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
         let code = app.selected_constellation_code().unwrap().to_string();
+        if let Some(transition) = app.sky_transition.as_mut() {
+            transition.started = Instant::now() - SKY_TRANSITION_DURATION;
+        }
         app.set_pointer_canvas(100, 28);
         let target = app
             .zoomed_visible_stars_for_current_view(app.pointer.width, app.pointer.height)

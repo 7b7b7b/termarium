@@ -59,22 +59,33 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "constellation_pulled_back") => "Zoom returned to full sky",
         (Language::En, "constellation_hidden_hint") => "Tab selects a visible constellation",
         (Language::En, "legend") => "Legend",
+        (Language::En, "legend_sky") => "Sky legend",
+        (Language::En, "legend_globe") => "Globe legend",
         (Language::En, "legend_bright_star") => "bright star",
         (Language::En, "legend_dim_star") => "dim star",
         (Language::En, "legend_constellation") => "constellation node",
         (Language::En, "legend_deep_sky") => "deep-sky object",
         (Language::En, "legend_planets") => "planets",
+        (Language::En, "legend_globe_day") => "sunlit texture",
+        (Language::En, "legend_globe_night") => "night texture",
+        (Language::En, "legend_globe_cities") => "city list",
+        (Language::En, "legend_globe_graticule") => "graticule",
+        (Language::En, "legend_globe_cursor") => "preview center",
+        (Language::En, "legend_globe_saved") => "saved observer",
+        (Language::En, "legend_globe_backdrop") => "opposite sky",
         (Language::En, "search") => "Search",
+        (Language::En, "city_search") => "City Search",
         (Language::En, "search_empty") => {
             "Type a star, alias, HIP/HD, constellation, planet, or Messier object"
         }
+        (Language::En, "city_search_empty") => "Type a city name, timezone, or Chinese name",
         (Language::En, "type_to_search") => "type to search",
         (Language::En, "city_no_match") => "No city match",
         (Language::En, "no_visible_constellations") => "No visible constellations",
         (Language::En, "selection_cleared") => "Selection cleared",
         (Language::En, "ground_mode") => "Globe view",
         (Language::En, "sky_mode") => "Sky view",
-        (Language::En, "ground_cursor") => "Center",
+        (Language::En, "ground_cursor") => "Preview",
         (Language::En, "tour_on") => "City tour on",
         (Language::En, "tour_off") => "City tour off",
         (Language::En, "setup") => "Setup",
@@ -98,6 +109,12 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         }
         (Language::En, "footer_compact") => {
             "q/zoom · s location · g globe/sky · ←/→ city · space · x pointer · z zoom · +/- mag · / search · Tab · c lines · o · ?"
+        }
+        (Language::En, "ground_footer") => {
+            "q quit · g sky · / city · ←/→ longitude · ↑/↓ latitude · s save preview · space pause · [/] hour · { / } day · r live · T theme · u charset · a anim · o settings · ? help"
+        }
+        (Language::En, "ground_footer_compact") => {
+            "q · g sky · / city · arrows rotate · s save · space · [/] · r · T/u/a · o · ?"
         }
         (Language::En, "help_body") => {
             "Navigation\nq      quit; exit zoom first while zoomed\nEsc    clear selected target; quit if nothing is selected\ng      globe / sky flip\n←/→    switch city preset; rotate globe in Globe view\n↑/↓    rotate globe in Globe view\nTab    next visible constellation\nS-Tab  previous visible constellation\n/      search star, constellation, planet, or deep-sky object\ns      location setup; type on preset to search city; save Globe preview through setup\no      settings panel\n?      close help\n\nTime\nspace  pause; press again to return to live sky\n[ / ]  jump one hour back / forward\n{ / }  jump one day back / forward\nr      return to live sky\n\nPanels and modes\nh      tonight panel\nv      city tour\nm      moon panel\nl      star labels\nc      constellation lines\np      planets\nd      deep-sky objects\na      animations\n\nAppearance and language\nt      English / Chinese\nT      theme\nu      charset\n+ / -  limiting magnitude\n\nSettings panel\nUse o for less frequent options: language, theme, charset, animations, planets, deep-sky objects, moon panel, labels, constellation lines, side panel, limiting magnitude."
@@ -167,20 +184,31 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "constellation_pulled_back") => "已拉回全局天空",
         (Language::Zh, "constellation_hidden_hint") => "Tab 可切换到可见星座",
         (Language::Zh, "legend") => "图例",
+        (Language::Zh, "legend_sky") => "星空图例",
+        (Language::Zh, "legend_globe") => "地球图例",
         (Language::Zh, "legend_bright_star") => "亮星",
         (Language::Zh, "legend_dim_star") => "暗星",
         (Language::Zh, "legend_constellation") => "星座节点",
         (Language::Zh, "legend_deep_sky") => "深空天体",
         (Language::Zh, "legend_planets") => "行星",
+        (Language::Zh, "legend_globe_day") => "白天纹理",
+        (Language::Zh, "legend_globe_night") => "夜晚纹理",
+        (Language::Zh, "legend_globe_cities") => "城市列表",
+        (Language::Zh, "legend_globe_graticule") => "经纬线",
+        (Language::Zh, "legend_globe_cursor") => "预览中心",
+        (Language::Zh, "legend_globe_saved") => "已保存观测点",
+        (Language::Zh, "legend_globe_backdrop") => "背面星空",
         (Language::Zh, "search") => "搜索",
+        (Language::Zh, "city_search") => "搜索城市",
         (Language::Zh, "search_empty") => "输入星名、别名、HIP/HD、星座、行星或梅西耶天体",
+        (Language::Zh, "city_search_empty") => "输入城市名、时区或中文名",
         (Language::Zh, "type_to_search") => "输入以搜索",
         (Language::Zh, "city_no_match") => "无匹配城市",
         (Language::Zh, "no_visible_constellations") => "当前没有可见星座",
         (Language::Zh, "selection_cleared") => "已取消选中",
         (Language::Zh, "ground_mode") => "地球视图",
         (Language::Zh, "sky_mode") => "星空视图",
-        (Language::Zh, "ground_cursor") => "中心",
+        (Language::Zh, "ground_cursor") => "预览点",
         (Language::Zh, "tour_on") => "城市巡游开启",
         (Language::Zh, "tour_off") => "城市巡游关闭",
         (Language::Zh, "setup") => "设置",
@@ -204,6 +232,12 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         }
         (Language::Zh, "footer_compact") => {
             "q/退放大 · s 位置 · g 地球/星空 · ←/→ 城市 · space · x 指针 · z 放大 · +/- 星等 · / 搜索 · Tab · c 连线 · o · ?"
+        }
+        (Language::Zh, "ground_footer") => {
+            "q 退出 · g 星空 · / 城市 · ←/→ 经度 · ↑/↓ 纬度 · s 保存预览点 · space 暂停 · [/] 小时 · { / } 天 · r 实时 · T 主题 · u 字符 · a 动效 · o 设置 · ? 帮助"
+        }
+        (Language::Zh, "ground_footer_compact") => {
+            "q · g 星空 · / 城市 · 方向键旋转 · s 保存 · space · [/] · r · T/u/a · o · ?"
         }
         (Language::Zh, "help_body") => {
             "导航\nq      退出；放大时先退出放大\nEsc    取消选中目标；无选中目标时退出\ng      地球 / 星空翻转\n←/→    切换城市预设；地球视图中旋转地球\n↑/↓    地球视图中旋转地球\nTab    下一个可见星座\nS-Tab  上一个可见星座\n/      搜索星名、星座、行星、深空天体\ns      位置设置；在预设行输入可搜索城市；通过设置保存地球预览点\no      设置面板\n?      关闭帮助\n\n时间\nspace  暂停；再次按下回到实时星空\n[ / ]  前后跳一小时\n{ / }  前后跳一天\nr      回到实时星空\n\n面板和模式\nh      今晚面板\nv      城市巡游\nm      月相面板\nl      星名标签\nc      星座连线\np      行星\nd      深空天体\na      动效\n\n外观和语言\nt      中英文\nT      主题\nu      字符集\n+ / -  极限星等\n\n设置面板\n按 o 修改不常调的选项：语言、主题、字符集、动效、行星、深空天体、月相面板、星名、星座连线、侧栏、极限星等。"

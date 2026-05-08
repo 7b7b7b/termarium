@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     io,
     time::{Duration as StdDuration, Instant},
@@ -19,16 +20,14 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
-    app::{self, App, Screen, Target, ViewMode},
+    app::{self, App, PRESETS, Screen, Target, ViewMode},
     astro,
     config::{Language, Location, Theme},
     constellations, i18n, planets, solar, star_aliases,
 };
-
-#[cfg(test)]
-use crate::app::PRESETS;
 
 #[derive(Debug, Clone, Copy)]
 struct Palette {
@@ -142,8 +141,9 @@ fn app_loop(
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let palette = palette(app.config.display.theme);
     match app.screen {
-        Screen::Sky | Screen::Search | Screen::Settings => draw_sky(frame, app, palette),
-        Screen::Setup => draw_setup(frame, app, palette),
+        Screen::Sky | Screen::Search | Screen::Settings | Screen::Setup => {
+            draw_sky(frame, app, palette)
+        }
     }
 
     if app.opening_ticks > 0 {
@@ -157,6 +157,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if matches!(app.screen, Screen::Settings) {
         draw_settings(frame, app, palette);
+    }
+    if matches!(app.screen, Screen::Setup) {
+        draw_setup(frame, app, palette);
     }
 }
 
@@ -498,12 +501,13 @@ fn ground_stat_title(app: &App, language: Language, palette: Palette) -> Line<'s
     let preview = &app.ground.preview_location;
     Line::from(Span::styled(
         format!(
-            " {} {:+.1} {:+.1} · {} {} · g {} ",
+            " {} {:+.1} {:+.1} · {} {} · s {} · g {} ",
             i18n::tr(language, "ground_cursor"),
             preview.latitude,
             preview.longitude,
             i18n::tr(language, "timezone"),
             preview.timezone,
+            i18n::tr(language, "save"),
             i18n::tr(language, "sky")
         ),
         Style::default().fg(palette.muted).bg(palette.bg),
@@ -559,7 +563,7 @@ fn horizon_transition_grid(
         location_progress,
         shape_progress,
     );
-    let motion = horizon_motion_vector(app);
+    let motion = horizon_path_motion_vector(app);
     let (globe_offset_x, globe_offset_y) =
         globe_motion_offset(from, to, progress, width, height, motion);
     for y in 0..height {
@@ -856,6 +860,7 @@ fn draw_globe_layer(
     {
         draw_globe_fill(grid, app, globe);
         draw_globe_graticule(grid, globe, palette, unicode);
+        draw_preset_city_markers(grid, app, globe, palette, unicode);
         draw_globe_markers(grid, app, globe, palette, unicode);
     }
 }
@@ -1070,7 +1075,10 @@ fn draw_globe_markers(
         || (saved.longitude - app.ground.preview_location.longitude).abs() > 0.0001
     {
         if let Some((x, y)) = globe.project(saved.longitude, saved.latitude) {
-            set_cell_overlay(grid, x, y, '+', Style::default().fg(palette.warm));
+            let style = Style::default().fg(palette.warm);
+            set_cell_overlay(grid, x, y, '+', style);
+            let label = location_display_label(saved, app.config.language, unicode);
+            draw_text_overlay(grid, x.saturating_add(2), y, &label, style, unicode);
         }
     }
 
@@ -1085,7 +1093,210 @@ fn draw_globe_markers(
         set_cell_offset_overlay(grid, x, y, 2, 0, if unicode { '─' } else { '-' }, style);
         set_cell_offset_overlay(grid, x, y, 0, -1, if unicode { '│' } else { '|' }, style);
         set_cell_offset_overlay(grid, x, y, 0, 1, if unicode { '│' } else { '|' }, style);
+        let label =
+            location_display_label(&app.ground.preview_location, app.config.language, unicode);
+        if !label.starts_with("Globe ") {
+            draw_text_overlay(grid, x.saturating_add(3), y, &label, style, unicode);
+        }
     }
+}
+
+fn draw_preset_city_markers(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    globe: GlobeProjection,
+    palette: Palette,
+    unicode: bool,
+) {
+    let style = Style::default().fg(palette.silver);
+    let marker = if unicode { '·' } else { '.' };
+    let mut occupied = label_occupancy_grid(grid);
+    reserve_globe_focus_labels(&mut occupied, app, globe, unicode);
+    let visible_cities = PRESETS
+        .iter()
+        .filter(|preset| !preset.custom)
+        .filter_map(|preset| {
+            globe
+                .project(preset.longitude, preset.latitude)
+                .map(|(x, y)| (preset, x, y))
+        })
+        .collect::<Vec<_>>();
+
+    for (_, x, y) in &visible_cities {
+        reserve_marker_cells(&mut occupied, *x, *y, 0);
+        set_cell_overlay(grid, *x, *y, marker, style);
+    }
+
+    for (preset, x, y) in visible_cities {
+        set_cell_overlay(grid, x, y, marker, style);
+
+        let is_preview = preset_matches_location(preset, &app.ground.preview_location);
+        let is_saved = preset_matches_location(preset, &app.config.location);
+        if is_preview || is_saved {
+            continue;
+        }
+
+        let label = preset_city_label(preset, app.config.language, unicode);
+        let label_width = canvas_label_width(label, unicode);
+        if label_width == 0 {
+            continue;
+        }
+
+        let Some((label_x, label_y)) = city_label_position(&occupied, x, y, label_width) else {
+            continue;
+        };
+        reserve_label_cells(&mut occupied, label_x, label_y, label_width);
+        draw_text_overlay(grid, label_x, label_y, label, style, unicode);
+    }
+}
+
+fn label_occupancy_grid(grid: &[Vec<SkyCell>]) -> Vec<Vec<bool>> {
+    let width = grid.first().map_or(0, Vec::len);
+    vec![vec![false; width]; grid.len()]
+}
+
+fn reserve_globe_focus_labels(
+    occupied: &mut [Vec<bool>],
+    app: &App,
+    globe: GlobeProjection,
+    unicode: bool,
+) {
+    let saved = &app.config.location;
+    if ((saved.latitude - app.ground.preview_location.latitude).abs() > 0.0001
+        || (saved.longitude - app.ground.preview_location.longitude).abs() > 0.0001)
+        && let Some((x, y)) = globe.project(saved.longitude, saved.latitude)
+    {
+        reserve_marker_cells(occupied, x, y, 1);
+        let label = location_display_label(saved, app.config.language, unicode);
+        reserve_label_cells(
+            occupied,
+            x.saturating_add(2),
+            y,
+            canvas_label_width(&label, unicode),
+        );
+    }
+
+    if let Some((x, y)) = globe.project(app.ground.cursor_lon, app.ground.cursor_lat) {
+        reserve_marker_cells(occupied, x, y, 2);
+        let label =
+            location_display_label(&app.ground.preview_location, app.config.language, unicode);
+        if !label.starts_with("Globe ") {
+            reserve_label_cells(
+                occupied,
+                x.saturating_add(3),
+                y,
+                canvas_label_width(&label, unicode),
+            );
+        }
+    }
+}
+
+fn city_label_position(
+    occupied: &[Vec<bool>],
+    marker_x: usize,
+    marker_y: usize,
+    label_width: usize,
+) -> Option<(usize, usize)> {
+    if label_width == 0 {
+        return None;
+    }
+    let grid_width = occupied.first().map_or(0, Vec::len) as isize;
+    let grid_height = occupied.len() as isize;
+    let x = marker_x as isize;
+    let y = marker_y as isize;
+    let width = label_width as isize;
+    let candidates = [
+        (x + 2, y),
+        (x - width - 2, y),
+        (x + 2, y - 1),
+        (x + 2, y + 1),
+        (x - width - 2, y - 1),
+        (x - width - 2, y + 1),
+        (x - width / 2, y - 2),
+        (x - width / 2, y + 2),
+    ];
+
+    candidates
+        .into_iter()
+        .filter(|(candidate_x, candidate_y)| {
+            *candidate_x >= 0
+                && *candidate_y >= 0
+                && candidate_x.saturating_add(width) <= grid_width
+                && *candidate_y < grid_height
+        })
+        .map(|(candidate_x, candidate_y)| (candidate_x as usize, candidate_y as usize))
+        .find(|(candidate_x, candidate_y)| {
+            label_cells_are_free(occupied, *candidate_x, *candidate_y, label_width)
+        })
+}
+
+fn label_cells_are_free(occupied: &[Vec<bool>], x: usize, y: usize, label_width: usize) -> bool {
+    let Some(row) = occupied.get(y) else {
+        return false;
+    };
+    if x >= row.len() || x.saturating_add(label_width) > row.len() {
+        return false;
+    }
+    let start = x.saturating_sub(1);
+    let end = x.saturating_add(label_width + 1).min(row.len());
+    row[start..end].iter().all(|cell| !*cell)
+}
+
+fn reserve_label_cells(occupied: &mut [Vec<bool>], x: usize, y: usize, label_width: usize) {
+    let Some(row) = occupied.get_mut(y) else {
+        return;
+    };
+    if x >= row.len() || label_width == 0 {
+        return;
+    }
+    let start = x.saturating_sub(1);
+    let end = x.saturating_add(label_width + 1).min(row.len());
+    for cell in &mut row[start..end] {
+        *cell = true;
+    }
+}
+
+fn reserve_marker_cells(occupied: &mut [Vec<bool>], x: usize, y: usize, radius: usize) {
+    let y_start = y.saturating_sub(radius);
+    let y_end = y
+        .saturating_add(radius)
+        .min(occupied.len().saturating_sub(1));
+    for row in occupied.iter_mut().take(y_end + 1).skip(y_start) {
+        if row.is_empty() {
+            continue;
+        }
+        let x_start = x.saturating_sub(radius);
+        let x_end = x.saturating_add(radius).min(row.len().saturating_sub(1));
+        for cell in &mut row[x_start..=x_end] {
+            *cell = true;
+        }
+    }
+}
+
+fn preset_city_label(preset: &app::Preset, language: Language, unicode: bool) -> &'static str {
+    match (language, unicode) {
+        (Language::Zh, true) => preset.zh,
+        _ => preset.en,
+    }
+}
+
+fn location_display_label<'a>(
+    location: &'a Location,
+    language: Language,
+    unicode: bool,
+) -> Cow<'a, str> {
+    if let Some(preset) = PRESETS
+        .iter()
+        .find(|preset| !preset.custom && preset_matches_location(preset, location))
+    {
+        return Cow::Borrowed(preset_city_label(preset, language, unicode));
+    }
+    Cow::Borrowed(location.name.as_str())
+}
+
+fn preset_matches_location(preset: &app::Preset, location: &Location) -> bool {
+    (preset.latitude - location.latitude).abs() < 0.0001
+        && (preset.longitude - location.longitude).abs() < 0.0001
 }
 
 fn draw_ground_overlay(grid: &mut [Vec<SkyCell>], app: &App, palette: Palette, unicode: bool) {
@@ -1123,19 +1334,6 @@ fn smootherstep01(progress: f64) -> f64 {
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
-fn staged_transition_sky_progress(
-    from: ViewMode,
-    to: ViewMode,
-    progress: f64,
-    look_up: f64,
-) -> f64 {
-    if matches!((from, to), (ViewMode::Ground, ViewMode::Sky)) {
-        ((progress - 0.14) / 0.86).clamp(0.0, 1.0)
-    } else {
-        look_up
-    }
-}
-
 fn staged_horizon_sky_phase(
     from: ViewMode,
     to: ViewMode,
@@ -1144,9 +1342,9 @@ fn staged_horizon_sky_phase(
 ) -> (f64, f64) {
     match (from, to) {
         (ViewMode::Ground, ViewMode::Sky) => {
-            let p = staged_transition_sky_progress(from, to, progress, look_up);
-            let location = smootherstep01((p / 0.56).clamp(0.0, 1.0));
-            let shape = smootherstep01((p / 0.88).clamp(0.0, 1.0));
+            let p = progress.clamp(0.0, 1.0);
+            let shape = smootherstep01((p / 0.56).clamp(0.0, 1.0));
+            let location = smootherstep01((p / 0.88).clamp(0.0, 1.0));
             (location, shape)
         }
         (ViewMode::Sky, ViewMode::Ground) => {
@@ -1159,19 +1357,21 @@ fn staged_horizon_sky_phase(
     }
 }
 
-fn horizon_motion_vector(app: &App) -> MotionVector {
-    let lon = app.ground.cursor_lon.to_radians();
-    let lat = app.ground.cursor_lat.to_radians();
-    let lat_weight = lat.cos().abs().max(0.35);
-    let x = lon.sin() * lat_weight * 1.35;
-    let y = -lon.cos() * lat_weight - lat.sin() * 0.55;
+fn horizon_path_motion_vector(app: &App) -> MotionVector {
+    let before = horizon_observer_location(app, 0.92);
+    let after = horizon_observer_location(app, 1.0);
+    let mean_lat = ((before.latitude + after.latitude) * 0.5).to_radians();
+    let lon_delta = normalize_degrees(after.longitude - before.longitude).to_radians();
+    let lat_delta = (after.latitude - before.latitude).to_radians();
+    let x = lon_delta * mean_lat.cos().abs().max(0.25);
+    let y = -lat_delta;
     let length = (x * x + y * y).sqrt();
     if length <= f64::EPSILON {
         MotionVector { x: 0.0, y: 1.0 }
     } else {
         MotionVector {
-            x: x / length,
-            y: y / length,
+            x: -x / length,
+            y: -y / length,
         }
     }
 }
@@ -1179,16 +1379,18 @@ fn horizon_motion_vector(app: &App) -> MotionVector {
 fn globe_motion_offset(
     from: ViewMode,
     to: ViewMode,
-    progress: f64,
+    eased_progress: f64,
     width: usize,
     height: usize,
     motion: MotionVector,
 ) -> (f64, f64) {
     let travel = (width.max(height) as f64 * 0.78).max(height as f64 * 1.15);
     let amount = match (from, to) {
-        (ViewMode::Ground, ViewMode::Sky) => smootherstep01((progress / 0.44).clamp(0.0, 1.0)),
+        (ViewMode::Ground, ViewMode::Sky) => {
+            smootherstep01((eased_progress / 0.42).clamp(0.0, 1.0))
+        }
         (ViewMode::Sky, ViewMode::Ground) => {
-            1.0 - smootherstep01(((progress - 0.42) / 0.42).clamp(0.0, 1.0))
+            1.0 - smootherstep01(((eased_progress - 0.42) / 0.42).clamp(0.0, 1.0))
         }
         _ => 0.0,
     };
@@ -2035,7 +2237,7 @@ fn selected_coordinates(app: &App) -> Option<(String, f64, f64)> {
         Target::DeepSky(name) => app
             .deep_sky_by_name(name)
             .map(|object| (object.name.to_string(), object.ra_hours, object.dec_degrees)),
-        Target::Constellation(_) => None,
+        Target::Constellation(_) | Target::City(_) => None,
     }
 }
 
@@ -2160,13 +2362,46 @@ fn draw_text(
     if x >= width {
         return;
     }
-    for (offset, ch) in text
-        .chars()
-        .filter_map(|ch| canvas_label_char(ch, unicode))
-        .take(width.saturating_sub(x))
-        .enumerate()
-    {
-        set_cell(grid, x + offset, y, ch, style);
+    let mut cursor = x;
+    for ch in text.chars().filter_map(|ch| canvas_label_char(ch, unicode)) {
+        let char_width = canvas_label_char_width(ch, unicode);
+        if cursor.saturating_add(char_width) > width {
+            break;
+        }
+        set_cell(grid, cursor, y, ch, style);
+        for continuation in 1..char_width {
+            set_cell(grid, cursor + continuation, y, ' ', style);
+        }
+        cursor += char_width;
+    }
+}
+
+fn draw_text_overlay(
+    grid: &mut [Vec<SkyCell>],
+    x: usize,
+    y: usize,
+    text: &str,
+    style: Style,
+    unicode: bool,
+) {
+    if grid.is_empty() || y >= grid.len() {
+        return;
+    }
+    let width = grid[y].len();
+    if x >= width {
+        return;
+    }
+    let mut cursor = x;
+    for ch in text.chars().filter_map(|ch| canvas_label_char(ch, unicode)) {
+        let char_width = canvas_label_char_width(ch, unicode);
+        if cursor.saturating_add(char_width) > width {
+            break;
+        }
+        set_cell_overlay(grid, cursor, y, ch, style);
+        for continuation in 1..char_width {
+            set_cell_overlay(grid, cursor + continuation, y, ' ', style);
+        }
+        cursor += char_width;
     }
 }
 
@@ -2175,6 +2410,21 @@ fn canvas_label_char(ch: char, unicode: bool) -> Option<char> {
         Some(ch)
     } else {
         None
+    }
+}
+
+fn canvas_label_width(text: &str, unicode: bool) -> usize {
+    text.chars()
+        .filter_map(|ch| canvas_label_char(ch, unicode))
+        .map(|ch| canvas_label_char_width(ch, unicode))
+        .sum()
+}
+
+fn canvas_label_char_width(ch: char, unicode: bool) -> usize {
+    if unicode {
+        UnicodeWidthChar::width(ch).unwrap_or(1).max(1)
+    } else {
+        1
     }
 }
 
@@ -2202,9 +2452,19 @@ fn set_cell_overlay(grid: &mut [Vec<SkyCell>], x: usize, y: usize, ch: char, sty
 fn grid_to_lines(grid: Vec<Vec<SkyCell>>) -> Vec<Line<'static>> {
     grid.into_iter()
         .map(|row| {
+            let mut skip_continuation_cells = 0usize;
             Line::from(
                 row.into_iter()
-                    .map(|cell| Span::styled(cell.ch.to_string(), cell.style))
+                    .filter_map(|cell| {
+                        if skip_continuation_cells > 0 {
+                            skip_continuation_cells -= 1;
+                            return None;
+                        }
+                        skip_continuation_cells = UnicodeWidthChar::width(cell.ch)
+                            .unwrap_or(1)
+                            .saturating_sub(1);
+                        Some(Span::styled(cell.ch.to_string(), cell.style))
+                    })
                     .collect::<Vec<_>>(),
             )
         })
@@ -2452,6 +2712,7 @@ fn push_target_summary(lines: &mut Vec<Line<'static>>, app: &App, target: &Targe
             lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
             lines.push(Line::from(meta.zh.to_string()));
         }
+        Target::City(_) => {}
     }
 }
 
@@ -2604,6 +2865,7 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 )));
             }
         }
+        Some(Target::City(_)) => {}
         None => {}
     }
     lines
@@ -2713,11 +2975,18 @@ fn recommendation_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
 }
 
 fn legend_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
+    if app.view_mode == ViewMode::Ground {
+        return globe_legend_lines(app, palette);
+    }
+    sky_legend_lines(app, palette)
+}
+
+fn sky_legend_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
     let language = app.config.language;
     let unicode = app.config.display.charset.canvas_unicode();
     vec![
         Line::from(Span::styled(
-            i18n::tr(language, "legend"),
+            i18n::tr(language, "legend_sky"),
             Style::default()
                 .fg(palette.cyan)
                 .add_modifier(Modifier::BOLD),
@@ -2743,6 +3012,48 @@ fn legend_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
             i18n::tr(language, "legend_deep_sky")
         )),
         Line::from(format!("M/S {}", i18n::tr(language, "legend_planets"))),
+    ]
+}
+
+fn globe_legend_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
+    let language = app.config.language;
+    let unicode = app.config.display.charset.canvas_unicode();
+    vec![
+        Line::from(Span::styled(
+            i18n::tr(language, "legend_globe"),
+            Style::default()
+                .fg(palette.cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled("██", Style::default().fg(Color::Rgb(116, 164, 104))),
+            Span::raw(format!(" {}", i18n::tr(language, "legend_globe_day"))),
+        ]),
+        Line::from(vec![
+            Span::styled("██", Style::default().fg(Color::Rgb(37, 62, 86))),
+            Span::raw(format!(" {}", i18n::tr(language, "legend_globe_night"))),
+        ]),
+        Line::from(format!(
+            "{} {}",
+            if unicode { '·' } else { '.' },
+            i18n::tr(language, "legend_globe_cities")
+        )),
+        Line::from(format!(
+            "{} {}",
+            if unicode { '·' } else { '.' },
+            i18n::tr(language, "legend_globe_graticule")
+        )),
+        Line::from(format!(
+            "{} {}",
+            if unicode { '◎' } else { '@' },
+            i18n::tr(language, "legend_globe_cursor")
+        )),
+        Line::from(format!("+ {}", i18n::tr(language, "legend_globe_saved"))),
+        Line::from(format!(
+            "{} {}",
+            star_symbol(3.0, unicode, 0),
+            i18n::tr(language, "legend_globe_backdrop")
+        )),
     ]
 }
 
@@ -2856,10 +3167,12 @@ fn brightest_visible_star(app: &App) -> Option<crate::catalog::Star> {
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     let language = app.config.language;
-    let footer_key = if area.width < 118 {
-        "footer_compact"
-    } else {
-        "footer"
+    let compact = area.width < 118;
+    let footer_key = match (app.view_mode, compact) {
+        (ViewMode::Ground, true) => "ground_footer_compact",
+        (ViewMode::Ground, false) => "ground_footer",
+        (ViewMode::Sky, true) => "footer_compact",
+        (ViewMode::Sky, false) => "footer",
     };
     let text = if app.message.is_empty() {
         i18n::tr(language, footer_key).to_string()
@@ -2876,13 +3189,8 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
 
 fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
-    let root = frame.area();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(palette.bg)),
-        root,
-    );
-    let area = centered_rect(root, 78, 22);
-    frame.render_widget(Clear, area);
+    let area = centered_rect(frame.area(), 78, 22);
+    dim_modal_background(frame, area, palette);
     let block = Block::default()
         .title(format!(" {} ", i18n::tr(language, "setup_title")))
         .title_style(
@@ -2891,8 +3199,7 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.dim_line))
-        .style(Style::default().bg(palette.panel));
+        .border_style(Style::default().fg(palette.dim_line));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -2923,7 +3230,6 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
         i18n::tr(language, "observer"),
         Style::default()
             .fg(palette.muted)
-            .bg(palette.panel)
             .add_modifier(Modifier::BOLD),
     )));
     lines.push(setup_info_line(
@@ -2959,18 +3265,18 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
     };
     lines.push(Line::from(Span::styled(
         i18n::tr(language, hint_key),
-        Style::default().fg(palette.muted).bg(palette.panel),
+        Style::default().fg(palette.muted),
     )));
     if !app.message.is_empty() {
         lines.push(Line::from(Span::styled(
             app.message.clone(),
-            Style::default().fg(palette.moon).bg(palette.panel),
+            Style::default().fg(palette.moon),
         )));
     }
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver).bg(palette.panel))
+            .style(Style::default().fg(palette.silver))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -2981,21 +3287,20 @@ fn setup_action_line(text: String, selected: bool, palette: Palette) -> Line<'st
     let style = if selected {
         Style::default()
             .fg(palette.warm)
-            .bg(Color::Rgb(24, 34, 50))
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(palette.silver).bg(palette.panel)
+        Style::default().fg(palette.silver)
     };
     Line::from(vec![
-        Span::styled(prefix, Style::default().fg(palette.cyan).bg(palette.panel)),
+        Span::styled(prefix, Style::default().fg(palette.cyan)),
         Span::styled(text, style),
     ])
 }
 
 fn setup_info_line(text: String, palette: Palette) -> Line<'static> {
     Line::from(vec![
-        Span::styled("  ", Style::default().bg(palette.panel)),
-        Span::styled(text, Style::default().fg(palette.muted).bg(palette.panel)),
+        Span::raw("  "),
+        Span::styled(text, Style::default().fg(palette.muted)),
     ])
 }
 
@@ -3037,17 +3342,20 @@ fn setup_preset_row(app: &App, language: Language) -> String {
 fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
     let area = centered_rect(frame.area(), 58, 18);
-    frame.render_widget(Clear, area);
+    dim_modal_background(frame, area, palette);
+    let title_key = match app.search.mode {
+        app::SearchMode::Sky => "search",
+        app::SearchMode::City => "city_search",
+    };
     let block = Block::default()
-        .title(format!(" {} ", i18n::tr(language, "search")))
+        .title(format!(" {} ", i18n::tr(language, title_key)))
         .title_style(
             Style::default()
                 .fg(palette.cyan)
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.cyan))
-        .style(Style::default().bg(palette.panel));
+        .border_style(Style::default().fg(palette.cyan));
     let inner = block.inner(area).inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -3062,8 +3370,12 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
         Line::from(""),
     ];
     if app.search.results.is_empty() {
+        let empty_key = match app.search.mode {
+            app::SearchMode::Sky => "search_empty",
+            app::SearchMode::City => "city_search_empty",
+        };
         lines.push(Line::from(Span::styled(
-            i18n::tr(language, "search_empty"),
+            i18n::tr(language, empty_key),
             Style::default().fg(palette.muted),
         )));
     } else {
@@ -3090,7 +3402,7 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver).bg(palette.panel))
+            .style(Style::default().fg(palette.silver))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -3099,7 +3411,7 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
 fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
     let area = centered_rect(frame.area(), 60, 19);
-    frame.render_widget(Clear, area);
+    dim_modal_background(frame, area, palette);
     let block = Block::default()
         .title(format!(" {} ", i18n::tr(language, "settings")))
         .title_style(
@@ -3108,8 +3420,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.cyan))
-        .style(Style::default().bg(palette.panel));
+        .border_style(Style::default().fg(palette.cyan));
     let inner = block.inner(area).inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -3144,7 +3455,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver).bg(palette.panel))
+            .style(Style::default().fg(palette.silver))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -3252,7 +3563,7 @@ fn draw_help(frame: &mut Frame, app: &App, palette: Palette) {
     });
     frame.render_widget(block, area);
 
-    let (left, right) = help_columns(language, palette);
+    let (left, right) = help_columns_for_view(language, app.view_mode, palette);
     if inner.width >= 62 {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -3278,6 +3589,35 @@ fn dim_help_background(frame: &mut Frame, area: Rect, palette: Palette) {
                 cell.set_fg(palette.veil);
             }
         }
+    }
+}
+
+fn dim_modal_background(frame: &mut Frame, area: Rect, palette: Palette) {
+    let buffer = frame.buffer_mut();
+    let area = buffer.area.intersection(area);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.set_fg(dim_color(cell.fg, palette.veil, 0.42));
+            cell.set_bg(dim_color(cell.bg, palette.bg, 0.28));
+        }
+    }
+}
+
+fn dim_color(color: Color, fallback: Color, amount: f64) -> Color {
+    let amount = amount.clamp(0.0, 1.0);
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f64 * amount).round().clamp(0.0, 255.0) as u8,
+            (g as f64 * amount).round().clamp(0.0, 255.0) as u8,
+            (b as f64 * amount).round().clamp(0.0, 255.0) as u8,
+        ),
+        Color::Black => Color::Black,
+        Color::DarkGray => Color::Rgb(18, 20, 24),
+        Color::Gray => Color::Rgb(34, 38, 44),
+        Color::White => Color::Rgb(72, 78, 88),
+        Color::Reset => fallback,
+        _ => fallback,
     }
 }
 
@@ -3346,15 +3686,24 @@ fn draw_transparent_text(
     cursor
 }
 
+#[cfg(test)]
 fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    match language {
-        Language::Zh => (
+    help_columns_for_view(language, ViewMode::Sky, palette)
+}
+
+fn help_columns_for_view(
+    language: Language,
+    view_mode: ViewMode,
+    palette: Palette,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    match (language, view_mode) {
+        (Language::Zh, ViewMode::Sky) => (
             vec![
                 help_section("导航", palette),
-                help_item("q", "退出", palette),
+                help_item("q", "退出 / 退放大", palette),
                 help_item("Esc", "取消选中 / 退出", palette),
-                help_item("g", "地球 / 星空翻转", palette),
-                help_item("←/→/↑/↓", "切换城市 / 旋转地球", palette),
+                help_item("g", "进入地球", palette),
+                help_item("←/→", "切换城市", palette),
                 help_item("Tab", "下个可见星座", palette),
                 help_item("S-Tab", "上个可见星座", palette),
                 help_item("z", "放大星座", palette),
@@ -3389,13 +3738,46 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("o", "不常用设置", palette),
             ],
         ),
-        Language::En => (
+        (Language::Zh, ViewMode::Ground) => (
+            vec![
+                help_section("地球导航", palette),
+                help_item("q/Esc", "退出", palette),
+                help_item("g", "回到星空", palette),
+                help_item("←/→", "旋转经度", palette),
+                help_item("↑/↓", "调整纬度", palette),
+                help_item("/", "搜索城市", palette),
+                help_item("s", "保存预览点", palette),
+                help_item("o", "设置面板", palette),
+                help_item("?", "关闭帮助", palette),
+                Line::from(""),
+                help_section("时间", palette),
+                help_item("space", "暂停 / 回实时", palette),
+                help_item("[ / ]", "前后一小时", palette),
+                help_item("{ / }", "前后一天", palette),
+                help_item("r", "回到实时", palette),
+            ],
+            vec![
+                help_section("地球视图", palette),
+                help_item("准星", "当前预览观测点", palette),
+                help_item("明暗", "太阳照射亮度", palette),
+                help_item("星幕", "地球背面天空", palette),
+                help_item("s", "进入设置后确认保存", palette),
+                Line::from(""),
+                help_section("外观和设置", palette),
+                help_item("t", "中英文", palette),
+                help_item("T", "主题", palette),
+                help_item("u", "字符集", palette),
+                help_item("a", "动效", palette),
+                help_item("o", "不常用设置", palette),
+            ],
+        ),
+        (Language::En, ViewMode::Sky) => (
             vec![
                 help_section("Navigation", palette),
-                help_item("q", "quit", palette),
+                help_item("q", "quit / exit zoom", palette),
                 help_item("Esc", "clear / quit", palette),
-                help_item("g", "globe / sky flip", palette),
-                help_item("←/→/↑/↓", "city / rotate globe", palette),
+                help_item("g", "open globe", palette),
+                help_item("←/→", "switch city", palette),
                 help_item("Tab", "next constellation", palette),
                 help_item("S-Tab", "previous constellation", palette),
                 help_item("z", "zoom constellation", palette),
@@ -3427,6 +3809,39 @@ fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Ve
                 help_item("T", "theme", palette),
                 help_item("u", "charset", palette),
                 help_item("+ / -", "limiting mag", palette),
+                help_item("o", "less-used settings", palette),
+            ],
+        ),
+        (Language::En, ViewMode::Ground) => (
+            vec![
+                help_section("Globe Navigation", palette),
+                help_item("q/Esc", "quit", palette),
+                help_item("g", "return to sky", palette),
+                help_item("←/→", "rotate longitude", palette),
+                help_item("↑/↓", "adjust latitude", palette),
+                help_item("/", "search city", palette),
+                help_item("s", "save preview", palette),
+                help_item("o", "settings panel", palette),
+                help_item("?", "close help", palette),
+                Line::from(""),
+                help_section("Time", palette),
+                help_item("space", "pause / live", palette),
+                help_item("[ / ]", "one hour", palette),
+                help_item("{ / }", "one day", palette),
+                help_item("r", "return live", palette),
+            ],
+            vec![
+                help_section("Globe View", palette),
+                help_item("cross", "preview observer", palette),
+                help_item("shade", "sunlight brightness", palette),
+                help_item("stars", "opposite sky", palette),
+                help_item("s", "confirm save in setup", palette),
+                Line::from(""),
+                help_section("Display and Settings", palette),
+                help_item("t", "language", palette),
+                help_item("T", "theme", palette),
+                help_item("u", "charset", palette),
+                help_item("a", "animations", palette),
                 help_item("o", "less-used settings", palette),
             ],
         ),
@@ -3486,6 +3901,7 @@ mod tests {
     use chrono::TimeZone;
     use crossterm::event::{KeyCode, KeyEvent};
     use ratatui::{Terminal, backend::TestBackend};
+    use unicode_width::UnicodeWidthStr;
 
     use super::*;
     use crate::{
@@ -3626,6 +4042,163 @@ mod tests {
         assert!(i18n::tr(Language::En, "footer_compact").contains("+/- mag"));
         assert!(i18n::tr(Language::En, "footer_compact").contains("c lines"));
         assert!(i18n::tr(Language::En, "footer_compact").contains("g globe/sky"));
+        assert!(i18n::tr(Language::En, "ground_footer_compact").contains("arrows rotate"));
+        assert!(i18n::tr(Language::En, "ground_footer_compact").contains("/ city"));
+        assert!(!i18n::tr(Language::En, "ground_footer").contains("z zoom"));
+        assert!(!i18n::tr(Language::Zh, "ground_footer").contains("c 连线"));
+    }
+
+    #[test]
+    fn ground_footer_and_legend_use_globe_text() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.display.animations = false;
+        app.config.display.side_panel = true;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(text.contains("arrows rotate"));
+        assert!(text.contains("Globe legend"));
+        assert!(text.contains("preview center"));
+        assert!(!text.contains("constellation node"));
+    }
+
+    #[test]
+    fn ground_globe_labels_visible_city_presets() {
+        let backend = TestBackend::new(140, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.display.side_panel = false;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 30.0,
+            cursor_lon: 110.0,
+            preview_location: Location {
+                name: "East Asia".to_string(),
+                latitude: 30.0,
+                longitude: 110.0,
+                timezone: "Asia/Shanghai".to_string(),
+            },
+        };
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 140, 40);
+        let present = [
+            "Shanghai",
+            "Beijing",
+            "Guangzhou",
+            "Chengdu",
+            "Tokyo",
+            "Seoul",
+            "Singapore",
+            "Delhi",
+        ]
+        .into_iter()
+        .filter(|city| text.contains(city))
+        .collect::<Vec<_>>();
+        assert!(
+            present.len() >= 3,
+            "expected several visible city labels, found {present:?}\n{text}"
+        );
+    }
+
+    #[test]
+    fn ground_current_city_label_stays_localized_after_roundtrip() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.language = Language::Zh;
+        app.config.display.charset = Charset::Unicode;
+        app.config.display.animations = false;
+        app.config.location = Location {
+            name: "London".to_string(),
+            latitude: 51.5072,
+            longitude: -0.1276,
+            timezone: "Europe/London".to_string(),
+        };
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(text.contains("伦"));
+        assert!(text.contains("敦"));
+    }
+
+    #[test]
+    fn city_label_positions_declutter_dense_rows() {
+        let mut occupied = vec![vec![false; 24]; 7];
+        let first = city_label_position(&occupied, 10, 3, 4).unwrap();
+        reserve_label_cells(&mut occupied, first.0, first.1, 4);
+        let second = city_label_position(&occupied, 10, 3, 4).unwrap();
+        reserve_label_cells(&mut occupied, second.0, second.1, 4);
+
+        assert_ne!(first, second);
+        let overlap_on_same_row = first.1 == second.1
+            && first.0 < second.0.saturating_add(4)
+            && second.0 < first.0.saturating_add(4);
+        assert!(!overlap_on_same_row);
+        assert!(!label_cells_are_free(&occupied, first.0, first.1, 4));
+        assert!(!label_cells_are_free(&occupied, second.0, second.1, 4));
+    }
+
+    #[test]
+    fn horizon_globe_motion_uses_opposite_side_of_sky_path() {
+        let mut app = app_for_test(false);
+        app.ground = app::GroundState {
+            cursor_lat: 20.0,
+            cursor_lon: 100.0,
+            preview_location: Location {
+                name: "East".to_string(),
+                latitude: 20.0,
+                longitude: 100.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+        let east = horizon_path_motion_vector(&app);
+        assert!(east.x < 0.0);
+
+        app.ground.cursor_lon = -100.0;
+        app.ground.preview_location.longitude = -100.0;
+        let west = horizon_path_motion_vector(&app);
+        assert!(west.x > 0.0);
+    }
+
+    #[test]
+    fn ground_to_sky_globe_offset_mirrors_sky_to_ground_timing() {
+        let motion = MotionVector { x: 1.0, y: 0.0 };
+        let width = 120;
+        let height = 36;
+        let (ground_start, _) =
+            globe_motion_offset(ViewMode::Ground, ViewMode::Sky, 0.0, width, height, motion);
+        let (ground_mid, _) =
+            globe_motion_offset(ViewMode::Ground, ViewMode::Sky, 0.21, width, height, motion);
+        let (ground_gone, _) =
+            globe_motion_offset(ViewMode::Ground, ViewMode::Sky, 0.42, width, height, motion);
+        let (sky_waiting, _) =
+            globe_motion_offset(ViewMode::Sky, ViewMode::Ground, 0.42, width, height, motion);
+        let (sky_mid, _) =
+            globe_motion_offset(ViewMode::Sky, ViewMode::Ground, 0.63, width, height, motion);
+        let (sky_arrived, _) =
+            globe_motion_offset(ViewMode::Sky, ViewMode::Ground, 0.84, width, height, motion);
+
+        assert!(ground_start < ground_mid && ground_mid < ground_gone);
+        assert!((ground_gone - sky_waiting).abs() < 1.0);
+        assert!(sky_waiting > sky_mid && sky_mid > sky_arrived);
+    }
+
+    #[test]
+    fn ground_city_search_overlay_uses_city_text() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.config.display.animations = false;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Char('/'))).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(text.contains("City Search"));
+        assert!(text.contains("Shanghai"));
     }
 
     #[test]
@@ -3651,6 +4224,18 @@ mod tests {
     }
 
     #[test]
+    fn ground_help_uses_ground_shortcuts() {
+        let (left, right) =
+            help_columns_for_view(Language::En, ViewMode::Ground, palette(Theme::Midnight));
+        let help_text = format!("{}{}", lines_text(&left), lines_text(&right));
+        assert!(help_text.contains("rotate longitude"));
+        assert!(help_text.contains("save preview"));
+        assert!(help_text.contains("opposite sky"));
+        assert!(!help_text.contains("zoom constellation"));
+        assert!(!help_text.contains("constellation lines"));
+    }
+
+    #[test]
     fn transparent_help_text_leaves_blank_cells_untouched() {
         let backend = TestBackend::new(12, 1);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3663,6 +4248,23 @@ mod tests {
             })
             .unwrap();
         terminal.backend().assert_buffer_lines(["a*b*********"]);
+    }
+
+    #[test]
+    fn canvas_text_accounts_for_wide_chinese_cells() {
+        let style = Style::default();
+        let empty = SkyCell { ch: ' ', style };
+        let mut grid = vec![vec![empty; 8]];
+        draw_text_overlay(&mut grid, 0, 0, "北京A", style, true);
+        let lines = grid_to_lines(grid);
+        let row = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(row.starts_with("北京A"));
+        assert_eq!(UnicodeWidthStr::width(row.as_str()), 8);
+        assert_eq!(canvas_label_width("北京A", true), 5);
     }
 
     #[test]

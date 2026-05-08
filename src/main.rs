@@ -63,7 +63,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    #[command(about = "Open the location setup screen.")]
+    #[command(about = "Open the first-run city picker and location setup flow.")]
     Setup,
     #[command(about = "Print the config file path.")]
     Config,

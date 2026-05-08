@@ -1,9 +1,10 @@
 # Termarium 穹顶终端
 
 Termarium is a quiet terminal planetarium. It opens as a full-screen TUI,
-asks for your observing location the first time, then renders a real bright-star
-sky map with constellations, planets, Messier objects, time travel, a moon phase
-panel, and an offline globe that flips into the sky from the horizon.
+lets you choose your observing city from an offline globe the first time, then
+renders a real bright-star sky map with constellations, planets, Messier
+objects, time travel, a moon phase panel, and a horizon flip between Earth and
+sky.
 
 ```bash
 cargo install termarium
@@ -28,10 +29,10 @@ Linux x64, and Windows x64.
 - Offline Messier deep-sky catalog derived from OpenNGC v20260501
 - Time travel, city tour, alias-aware target search, constellation highlight, and tonight panel
 - Crosshair pointer mode for selecting visible stars directly from the sky map
-- Globe view with offline Natural Earth coastlines/land, raster terrain colors, rotating preview, and horizon flip animation
+- Globe view with offline Blue Marble terrain colors, daylight shading, city labels, rotating preview, and horizon flip animation
 - Offline low-precision Venus, Mars, Jupiter, and Saturn positions
 - Sun altitude, daylight/twilight state, sunset, and next sunrise
-- First-run location setup with city presets, custom coordinates, and timezone
+- First-run city search on the globe, plus setup for custom coordinates and timezone
 - RA/Dec to Alt/Az sky projection for the current observer and time
 - Four themes plus ASCII/Unicode character modes
 - English by default, with in-app Chinese toggle
@@ -60,7 +61,7 @@ space   pause / resume
 [ / ]   jump one hour
 { / }   jump one day
 r       return to live sky
-/       search targets
+/       search sky targets
 s       setup location; type on the preset row to search city presets
 x       pointer mode; arrows move the crosshair, hover selects a star
 g       flip between sky and globe
@@ -72,9 +73,10 @@ v       city tour
 ?       detailed help
 ```
 
-In the globe view, arrow keys rotate to a temporary observing point. The preview is
-used when you flip back to the sky, but it is not saved unless you open setup
-from that preview and confirm it.
+In the globe view, arrow keys rotate to a temporary observing point. `/` searches
+the built-in city list, and visible city names are decluttered so dense regions
+stay readable. The preview is used when you flip back to the sky, but it is not
+saved unless you open setup from that preview and confirm it.
 
 Quick toggles still work, but they are also available in the settings panel:
 
@@ -96,9 +98,9 @@ constellation names, Chinese constellation names, planets, and Messier objects.
 For example, `Tau Ceti`, `τ Ceti`, `天仓五`, `HD 10700`, and `HIP 8102` all
 select the same star.
 
-The location setup preset row accepts typing to search preset city names,
-Chinese names, and timezones. The matched city fills the location fields, then
-the usual save row applies it.
+The first run opens the globe city search directly. The setup preset row also
+accepts typing to search preset city names, Chinese names, and timezones. The
+matched city fills the location fields, then the usual save row applies it.
 
 ## Data And License
 

@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "termarium"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1536,6 +1536,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]
