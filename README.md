@@ -56,22 +56,10 @@ termarium --time 2026-05-07T14:00:00Z
 Inside the TUI:
 
 ```text
-q       quit
-Esc     clear selected target; quit if nothing is selected
-←/→     switch city preset
-space   pause / resume
-[ / ]   jump one hour
-{ / }   jump one day
-r       return to live sky
 /       search sky targets
 s       setup location; type on the preset row to search city presets
-x       pointer mode; arrows move the crosshair, hover selects a star
 g       flip between sky and globe
-Tab     next visible constellation
-S-Tab   previous visible constellation
-h       toggle tonight panel
 o       settings panel
-v       city tour
 ?       detailed help
 ```
 
@@ -83,6 +71,20 @@ saved unless you open setup from that preview and confirm it.
 Quick toggles still work, but they are also available in the settings panel:
 
 ```text
+q       quit; exits constellation zoom first
+Esc     clear selected target; quit if nothing is selected
+←/→     switch city preset; rotate longitude in globe view
+↑/↓     adjust latitude in globe view
+space   pause / resume
+[ / ]   jump one hour
+{ / }   jump one day
+r       return to live sky
+x       pointer mode; arrows move the crosshair, hover selects a star
+z       zoom selected constellation
+Tab     next visible constellation
+S-Tab   previous visible constellation
+h       toggle tonight panel
+v       city tour
 a       toggle animations
 p       toggle planets
 d       toggle deep-sky objects
