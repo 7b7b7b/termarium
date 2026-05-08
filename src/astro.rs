@@ -217,22 +217,28 @@ mod tests {
     }
 
     #[test]
-    fn default_projection_places_east_on_left_for_observer_view() {
-        let center_x = 40;
-        let (east_x, _) = project_dome(0.0, 90.0, 81, 25).unwrap();
-        let (west_x, _) = project_dome(0.0, 270.0, 81, 25).unwrap();
-
-        assert!(east_x < center_x);
-        assert!(west_x > center_x);
+    fn projection_uses_look_up_handedness() {
+        let width = 81;
+        let height = 25;
+        let center_x = width / 2;
+        let (east_x, _) = project_dome(0.0, 90.0, width, height).unwrap();
+        let (west_x, _) = project_dome(0.0, 270.0, width, height).unwrap();
+        assert!(east_x < center_x, "east should appear left when looking up");
+        assert!(
+            west_x > center_x,
+            "west should appear right when looking up"
+        );
     }
 
     #[test]
     fn map_projection_places_east_on_right() {
-        let center_x = 40;
+        let width = 81;
+        let height = 25;
+        let center_x = width / 2;
         let (east_x, _) =
-            project_dome_for_orientation(0.0, 90.0, 81, 25, SkyOrientation::Map).unwrap();
+            project_dome_for_orientation(0.0, 90.0, width, height, SkyOrientation::Map).unwrap();
         let (west_x, _) =
-            project_dome_for_orientation(0.0, 270.0, 81, 25, SkyOrientation::Map).unwrap();
+            project_dome_for_orientation(0.0, 270.0, width, height, SkyOrientation::Map).unwrap();
 
         assert!(east_x > center_x);
         assert!(west_x < center_x);

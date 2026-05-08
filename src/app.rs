@@ -25,6 +25,7 @@ const TIME_REPEAT_TRANSITION_DURATION: StdDuration = StdDuration::from_millis(16
 const SETUP_PRESET_FIELD: usize = 0;
 const SETUP_SAVE_FIELD: usize = 1;
 const HORIZON_TRANSITION_DURATION: StdDuration = StdDuration::from_secs(3);
+const GROUND_ROTATION_DURATION: StdDuration = StdDuration::from_millis(420);
 const GROUND_LAT_STEP: f64 = 2.5;
 const GROUND_LON_STEP: f64 = 2.5;
 const GROUND_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
@@ -602,6 +603,15 @@ pub struct PointerState {
     pub hits: Vec<Target>,
 }
 
+#[derive(Debug, Clone)]
+struct ProjectedTarget {
+    target: Target,
+    x: usize,
+    y: usize,
+    score: f64,
+    sort_key: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ZoomBounds {
     min_x: usize,
@@ -629,6 +639,16 @@ struct SkyTransition {
 struct HorizonTransition {
     from: ViewMode,
     to: ViewMode,
+    started: Instant,
+    duration: StdDuration,
+}
+
+#[derive(Debug, Clone)]
+struct GroundRotationTransition {
+    from_lat: f64,
+    from_lon: f64,
+    to_lat: f64,
+    to_lon: f64,
     started: Instant,
     duration: StdDuration,
 }
@@ -716,6 +736,7 @@ pub struct App {
     last_ground_move: Option<(KeyCode, Instant)>,
     sky_transition: Option<SkyTransition>,
     horizon_transition: Option<HorizonTransition>,
+    ground_rotation_transition: Option<GroundRotationTransition>,
     pending_ground_transition: bool,
 }
 
@@ -781,6 +802,7 @@ impl App {
             last_ground_move: None,
             sky_transition: None,
             horizon_transition: None,
+            ground_rotation_transition: None,
             pending_ground_transition: false,
         }
     }
@@ -830,6 +852,13 @@ impl App {
             .is_some_and(|transition| transition.is_finished())
         {
             self.horizon_transition = None;
+        }
+        if self
+            .ground_rotation_transition
+            .as_ref()
+            .is_some_and(GroundRotationTransition::is_finished)
+        {
+            self.ground_rotation_transition = None;
         }
     }
 
@@ -1068,7 +1097,11 @@ impl App {
         Ok(())
     }
 
-    fn adjust_setting(&mut self, forward: bool) -> io::Result<()> {
+    pub(crate) fn select_setting(&mut self, index: usize) {
+        self.settings.selected = index.min(settings_count() - 1);
+    }
+
+    pub(crate) fn adjust_setting(&mut self, forward: bool) -> io::Result<()> {
         match self.settings.selected {
             0 => self.config.language = self.config.language.toggle(),
             1 => self.config.display.theme = self.config.display.theme.next(),
@@ -1101,31 +1134,7 @@ impl App {
                     self.screen = Screen::Sky;
                 }
             }
-            KeyCode::Enter => {
-                if let Some(result) = self.search.results.get(self.search.selected).cloned() {
-                    if let Target::City(index) = result.target {
-                        self.apply_ground_city(index)?;
-                    } else {
-                        if !matches!(result.target, Target::Constellation(_)) {
-                            self.constellation_zoom = false;
-                            self.constellation_zoom_code = None;
-                            self.sky_transition = None;
-                        } else if self.constellation_zoom {
-                            if let Target::Constellation(code) = &result.target {
-                                if let Some(from_code) =
-                                    self.selected_constellation_code().map(ToString::to_string)
-                                {
-                                    self.start_zoom_transition(from_code, code.clone());
-                                }
-                                self.constellation_zoom_code = Some(code.clone());
-                            }
-                        }
-                        self.selected_target = Some(result.target);
-                        self.message = result.label;
-                    }
-                }
-                self.screen = Screen::Sky;
-            }
+            KeyCode::Enter => self.activate_search_result(self.search.selected)?,
             KeyCode::Up => {
                 self.search.selected = self.search.selected.saturating_sub(1);
             }
@@ -1145,6 +1154,40 @@ impl App {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    pub(crate) fn select_search_result(&mut self, index: usize) {
+        if !self.search.results.is_empty() {
+            self.search.selected = index.min(self.search.results.len() - 1);
+        }
+    }
+
+    pub(crate) fn activate_search_result(&mut self, index: usize) -> io::Result<()> {
+        self.select_search_result(index);
+        if let Some(result) = self.search.results.get(self.search.selected).cloned() {
+            if let Target::City(index) = result.target {
+                self.apply_ground_city(index)?;
+            } else {
+                if !matches!(result.target, Target::Constellation(_)) {
+                    self.constellation_zoom = false;
+                    self.constellation_zoom_code = None;
+                    self.sky_transition = None;
+                } else if self.constellation_zoom
+                    && let Target::Constellation(code) = &result.target
+                {
+                    if let Some(from_code) =
+                        self.selected_constellation_code().map(ToString::to_string)
+                    {
+                        self.start_zoom_transition(from_code, code.clone());
+                    }
+                    self.constellation_zoom_code = Some(code.clone());
+                }
+                self.selected_target = Some(result.target);
+                self.message = result.label;
+            }
+        }
+        self.screen = Screen::Sky;
         Ok(())
     }
 
@@ -1192,7 +1235,7 @@ impl App {
         Ok(())
     }
 
-    fn move_setup_field(&mut self, field: usize) {
+    pub(crate) fn move_setup_field(&mut self, field: usize) {
         let field = field.min(SETUP_SAVE_FIELD);
         if self.setup.field == SETUP_PRESET_FIELD && field != SETUP_PRESET_FIELD {
             self.confirm_setup_preset_search();
@@ -1200,23 +1243,23 @@ impl App {
         self.setup.field = field;
     }
 
-    fn open_setup_from(&mut self, location: Location) {
+    pub(crate) fn open_setup_from(&mut self, location: Location) {
         self.setup = SetupState::from_location(&location);
         self.screen = Screen::Setup;
         self.message.clear();
     }
 
-    fn open_sky_search(&mut self) {
+    pub(crate) fn open_sky_search(&mut self) {
         self.search = SearchState::new(SearchMode::Sky, self.config.language);
         self.screen = Screen::Search;
     }
 
-    fn open_city_search(&mut self) {
+    pub(crate) fn open_city_search(&mut self) {
         self.search = SearchState::new(SearchMode::City, self.config.language);
         self.screen = Screen::Search;
     }
 
-    fn cycle_preset(&mut self, forward: bool) {
+    pub(crate) fn cycle_preset(&mut self, forward: bool) {
         let matches = self.setup_preset_matches();
         if matches.is_empty() {
             return;
@@ -1274,7 +1317,7 @@ impl App {
         }
     }
 
-    fn commit_setup(&mut self) -> io::Result<()> {
+    pub(crate) fn commit_setup(&mut self) -> io::Result<()> {
         self.confirm_setup_preset_search();
         let from_location = self.config.location.clone();
         let latitude = match self.setup.latitude.trim().parse::<f64>() {
@@ -1315,6 +1358,7 @@ impl App {
         self.start_city_transition(from_location, to_location);
         self.session_location = None;
         self.ground = GroundState::from_location(&self.config.location);
+        self.ground_rotation_transition = None;
         self.view_mode = ViewMode::Sky;
         self.horizon_transition = None;
         self.can_cancel_setup = true;
@@ -1365,22 +1409,39 @@ impl App {
         self.config.location = to_location;
         self.session_location = None;
         self.ground = GroundState::from_location(&self.config.location);
+        self.ground_rotation_transition = None;
         self.setup = SetupState::from_location(&self.config.location);
         if persist { self.save() } else { Ok(()) }
     }
 
-    fn apply_ground_city(&mut self, index: usize) -> io::Result<()> {
+    pub(crate) fn apply_ground_city(&mut self, index: usize) -> io::Result<()> {
         let Some(preset) = PRESETS.get(index).copied().filter(|preset| !preset.custom) else {
             return Ok(());
         };
         let location = location_for_preset(preset);
         let first_location_pick = !self.can_cancel_setup;
+        let animate_from = (self.config.display.animations
+            && self.view_mode == ViewMode::Ground
+            && self.horizon_transition.is_none())
+        .then(|| self.render_ground_center());
         self.stop_tour_without_restore();
         self.pointer.active = false;
         self.last_pointer_move = None;
         self.last_ground_move = None;
         self.view_mode = ViewMode::Ground;
         self.ground = GroundState::from_location(&location);
+        if let Some((from_lat, from_lon)) = animate_from {
+            self.ground_rotation_transition = Some(GroundRotationTransition {
+                from_lat,
+                from_lon,
+                to_lat: self.ground.cursor_lat,
+                to_lon: self.ground.cursor_lon,
+                started: Instant::now(),
+                duration: GROUND_ROTATION_DURATION,
+            });
+        } else {
+            self.ground_rotation_transition = None;
+        }
         self.setup = SetupState::from_location(&location);
         self.horizon_transition = None;
         self.sky_transition = None;
@@ -1482,6 +1543,7 @@ impl App {
             self.config.location = origin;
             self.session_location = None;
             self.ground = GroundState::from_location(&self.config.location);
+            self.ground_rotation_transition = None;
             self.setup = SetupState::from_location(&self.config.location);
             self.message = i18n::tr(self.config.language, "tour_off").to_string();
         } else {
@@ -1615,6 +1677,28 @@ impl App {
         }
     }
 
+    pub(crate) fn select_constellation_code(&mut self, code: String) {
+        let previous = self.selected_constellation_code().map(ToString::to_string);
+        self.pointer.active = false;
+        self.pointer.hovered = None;
+        self.pointer.hits.clear();
+        self.last_pointer_move = None;
+        self.selected_target = Some(Target::Constellation(code.clone()));
+        self.config.display.side_panel = true;
+
+        if self.constellation_zoom {
+            if previous.as_deref() != Some(code.as_str()) {
+                if let Some(from_code) = previous {
+                    self.start_zoom_transition(from_code, code.clone());
+                }
+            }
+            self.constellation_zoom_code = Some(code.clone());
+        }
+
+        let meta = constellations::meta_for(&code);
+        self.message = format!("{} · {}", meta.code, meta.en);
+    }
+
     pub fn selected_constellation_code(&self) -> Option<&str> {
         if self.constellation_zoom {
             if let Some(code) = self.constellation_zoom_code.as_deref() {
@@ -1647,6 +1731,13 @@ impl App {
             }
         }
         self.active_location().clone()
+    }
+
+    pub(crate) fn render_ground_center(&self) -> (f64, f64) {
+        self.ground_rotation_transition
+            .as_ref()
+            .map(GroundRotationTransition::center)
+            .unwrap_or((self.ground.cursor_lat, self.ground.cursor_lon))
     }
 
     pub fn zoom_transition(&self) -> Option<(&str, &str, f64)> {
@@ -1811,7 +1902,7 @@ impl App {
         }
     }
 
-    fn toggle_ground_sky(&mut self) {
+    pub(crate) fn toggle_ground_sky(&mut self) {
         let from = self.view_mode;
         match self.view_mode {
             ViewMode::Sky => {
@@ -1851,6 +1942,7 @@ impl App {
         self.constellation_zoom = false;
         self.constellation_zoom_code = None;
         self.ground = GroundState::from_location(self.active_location());
+        self.ground_rotation_transition = None;
         self.view_mode = ViewMode::Ground;
         self.message = i18n::tr(self.config.language, "ground_mode").to_string();
         self.start_horizon_transition(from, self.view_mode);
@@ -1872,7 +1964,29 @@ impl App {
     fn move_ground_cursor(&mut self, delta_lon: f64, delta_lat: f64) {
         let next_lat = (self.ground.cursor_lat + delta_lat).clamp(-89.5, 89.5);
         let next_lon = normalize_longitude(self.ground.cursor_lon + delta_lon);
-        self.ground = GroundState::from_cursor(next_lat, next_lon);
+        self.preview_ground_location(next_lat, next_lon);
+    }
+
+    pub(crate) fn preview_ground_location(&mut self, latitude: f64, longitude: f64) {
+        let (from_lat, from_lon) = self.render_ground_center();
+        let to_lat = latitude.clamp(-89.5, 89.5);
+        let to_lon = normalize_longitude(longitude);
+        self.ground = GroundState::from_cursor(to_lat, to_lon);
+        if self.config.display.animations
+            && self.view_mode == ViewMode::Ground
+            && self.horizon_transition.is_none()
+        {
+            self.ground_rotation_transition = Some(GroundRotationTransition {
+                from_lat,
+                from_lon,
+                to_lat,
+                to_lon,
+                started: Instant::now(),
+                duration: GROUND_ROTATION_DURATION,
+            });
+        } else {
+            self.ground_rotation_transition = None;
+        }
         self.message = format!(
             "{} {:+.1} {:+.1}",
             i18n::tr(self.config.language, "ground_cursor"),
@@ -2076,6 +2190,62 @@ impl App {
         self.update_pointer_hover();
     }
 
+    pub(crate) fn activate_pointer_at(&mut self, x: usize, y: usize, pick_radius: usize) {
+        let width = self.pointer.width;
+        let height = self.pointer.height;
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.pointer.active = true;
+        self.config.display.side_panel = true;
+        self.last_pointer_move = None;
+        self.pointer.x = x.min(width - 1);
+        self.pointer.y = y.min(height - 1);
+
+        let targets = self.projected_pointer_targets(width, height);
+        let exact_hits = targets
+            .iter()
+            .filter(|target| target.x == self.pointer.x && target.y == self.pointer.y)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !exact_hits.is_empty() {
+            self.apply_pointer_hits(exact_hits);
+            return;
+        }
+
+        let mut nearby = targets
+            .iter()
+            .filter(|target| {
+                target.x.abs_diff(self.pointer.x) <= pick_radius
+                    && target.y.abs_diff(self.pointer.y) <= pick_radius
+            })
+            .collect::<Vec<_>>();
+        nearby.sort_by(|a, b| {
+            let a_distance =
+                a.x.abs_diff(self.pointer.x).pow(2) + a.y.abs_diff(self.pointer.y).pow(2);
+            let b_distance =
+                b.x.abs_diff(self.pointer.x).pow(2) + b.y.abs_diff(self.pointer.y).pow(2);
+            a_distance.cmp(&b_distance).then_with(|| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.sort_key.cmp(&b.sort_key))
+            })
+        });
+
+        if let Some((nearest_x, nearest_y)) = nearby.first().map(|target| (target.x, target.y)) {
+            self.pointer.x = nearest_x;
+            self.pointer.y = nearest_y;
+            let hits = targets
+                .into_iter()
+                .filter(|target| target.x == nearest_x && target.y == nearest_y)
+                .collect::<Vec<_>>();
+            self.apply_pointer_hits(hits);
+        } else {
+            self.apply_pointer_hits(Vec::new());
+        }
+    }
+
     fn update_pointer_hover(&mut self) {
         let width = self.pointer.width;
         let height = self.pointer.height;
@@ -2085,6 +2255,15 @@ impl App {
             return;
         }
 
+        let hits = self
+            .projected_pointer_targets(width, height)
+            .into_iter()
+            .filter(|target| target.x == self.pointer.x && target.y == self.pointer.y)
+            .collect::<Vec<_>>();
+        self.apply_pointer_hits(hits);
+    }
+
+    fn projected_pointer_targets(&self, width: usize, height: usize) -> Vec<ProjectedTarget> {
         let location = self.render_location();
         let time = self.now();
         let zoom_view = self
@@ -2105,16 +2284,15 @@ impl App {
             )
         };
 
-        let mut hits = Vec::new();
-        for visible in visible
-            .iter()
-            .filter(|visible| visible.x == self.pointer.x && visible.y == self.pointer.y)
-        {
-            hits.push((
-                Target::Star(visible.star.hip),
-                visible.star.magnitude,
-                format!("star:{:010}", visible.star.hip),
-            ));
+        let mut targets = Vec::new();
+        for visible in visible {
+            targets.push(ProjectedTarget {
+                target: Target::Star(visible.star.hip),
+                x: visible.x,
+                y: visible.y,
+                score: visible.star.magnitude,
+                sort_key: format!("star:{:010}", visible.star.hip),
+            });
         }
 
         if self.config.display.planets {
@@ -2136,12 +2314,14 @@ impl App {
                         self.config.display.sky_orientation,
                     )
                 };
-                if projected == Some((self.pointer.x, self.pointer.y)) {
-                    hits.push((
-                        Target::Planet(planet.name),
-                        planet.magnitude - 0.25,
-                        format!("planet:{}", planet.name),
-                    ));
+                if let Some((x, y)) = projected {
+                    targets.push(ProjectedTarget {
+                        target: Target::Planet(planet.name),
+                        x,
+                        y,
+                        score: planet.magnitude - 0.25,
+                        sort_key: format!("planet:{}", planet.name),
+                    });
                 }
             }
         }
@@ -2168,23 +2348,30 @@ impl App {
                         self.config.display.sky_orientation,
                     )
                 };
-                if projected == Some((self.pointer.x, self.pointer.y)) {
-                    hits.push((
-                        Target::DeepSky(object.name),
-                        object.magnitude.unwrap_or(99.0) + 10.0,
-                        format!("deep:{}", object.name),
-                    ));
+                if let Some((x, y)) = projected {
+                    targets.push(ProjectedTarget {
+                        target: Target::DeepSky(object.name),
+                        x,
+                        y,
+                        score: object.magnitude.unwrap_or(99.0) + 10.0,
+                        sort_key: format!("deep:{}", object.name),
+                    });
                 }
             }
         }
 
+        targets
+    }
+
+    fn apply_pointer_hits(&mut self, mut hits: Vec<ProjectedTarget>) {
         hits.sort_by(|a, b| {
-            a.1.partial_cmp(&b.1)
+            a.score
+                .partial_cmp(&b.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.sort_key.cmp(&b.sort_key))
         });
-        hits.dedup_by(|a, b| a.0 == b.0);
-        self.pointer.hits = hits.into_iter().map(|(target, _, _)| target).collect();
+        hits.dedup_by(|a, b| a.target == b.target);
+        self.pointer.hits = hits.into_iter().map(|target| target.target).collect();
 
         if let Some(target) = self.pointer.hits.first().cloned() {
             self.pointer.hovered = Some(target.clone());
@@ -2569,6 +2756,30 @@ impl HorizonTransition {
 
     fn is_finished(&self) -> bool {
         self.progress() >= 1.0
+    }
+}
+
+impl GroundRotationTransition {
+    fn progress(&self) -> f64 {
+        if self.duration.is_zero() {
+            return 1.0;
+        }
+        (self.started.elapsed().as_secs_f64() / self.duration.as_secs_f64()).clamp(0.0, 1.0)
+    }
+
+    fn eased_progress(&self) -> f64 {
+        smoothstep(self.progress())
+    }
+
+    fn is_finished(&self) -> bool {
+        self.progress() >= 1.0
+    }
+
+    fn center(&self) -> (f64, f64) {
+        let progress = self.eased_progress();
+        let lat = lerp(self.from_lat, self.to_lat, progress);
+        let lon = lerp_longitude(self.from_lon, self.to_lon, progress);
+        (lat, lon)
     }
 }
 
@@ -3647,7 +3858,44 @@ mod tests {
         app.update_pointer_hover();
         assert_eq!(app.selected_target, Some(Target::Star(target.star.hip)));
         assert_eq!(app.pointer.hovered, Some(Target::Star(target.star.hip)));
-        assert_eq!(app.pointer.hits, vec![Target::Star(target.star.hip)]);
+        assert!(app.pointer.hits.contains(&Target::Star(target.star.hip)));
+    }
+
+    #[test]
+    fn pointer_mouse_activation_selects_visible_star() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-pointer-mouse-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.set_pointer_canvas(80, 24);
+        let visible = astro::visible_stars(
+            &app.catalog.stars,
+            &app.config.location,
+            app.now(),
+            app.config.display.limiting_magnitude,
+            app.pointer.width,
+            app.pointer.height,
+        );
+        let target = visible
+            .iter()
+            .find(|candidate| {
+                visible
+                    .iter()
+                    .filter(|other| other.x == candidate.x && other.y == candidate.y)
+                    .count()
+                    == 1
+            })
+            .unwrap();
+
+        app.activate_pointer_at(target.x, target.y, 5);
+
+        assert!(app.pointer.active);
+        assert_eq!(app.pointer.hovered, Some(Target::Star(target.star.hip)));
+        assert_eq!(app.selected_target, Some(Target::Star(target.star.hip)));
     }
 
     #[test]
