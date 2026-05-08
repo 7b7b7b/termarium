@@ -94,7 +94,7 @@ pub fn project_dome(
     let x_radius = center_x.max(1.0);
     let y_radius = center_y.max(1.0);
     let az = azimuth.to_radians();
-    let x = center_x + az.sin() * radius * x_radius;
+    let x = center_x - az.sin() * radius * x_radius;
     let y = center_y - az.cos() * radius * y_radius;
 
     if !x.is_finite() || !y.is_finite() {
@@ -171,6 +171,20 @@ mod tests {
                 assert!(y < 24);
             }
         }
+    }
+
+    #[test]
+    fn projection_uses_look_up_handedness() {
+        let width = 81;
+        let height = 25;
+        let center_x = width / 2;
+        let (east_x, _) = project_dome(0.0, 90.0, width, height).unwrap();
+        let (west_x, _) = project_dome(0.0, 270.0, width, height).unwrap();
+        assert!(east_x < center_x, "east should appear left when looking up");
+        assert!(
+            west_x > center_x,
+            "west should appear right when looking up"
+        );
     }
 
     #[test]

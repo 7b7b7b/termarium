@@ -1,14 +1,17 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io,
+    io::{self, Write},
     time::{Duration as StdDuration, Instant},
 };
 
 use chrono_tz::Tz;
 use crossterm::{
     cursor::{Hide, Show},
-    event::{self, Event as CEvent},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, MouseButton, MouseEvent,
+        MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -102,14 +105,21 @@ const EARTH_TEXTURE: &[u8] = include_bytes!("../data/earth_720x360.rgb");
 pub fn run(mut app: App) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Hide)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    execute!(terminal.backend_mut(), EnableMouseCapture, Hide)?;
+    terminal.backend_mut().flush()?;
 
     let result = app_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), Show, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        Show,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -125,8 +135,13 @@ fn app_loop(
         terminal.draw(|frame| draw(frame, app))?;
         let timeout = tick.saturating_sub(last_draw.elapsed());
         if event::poll(timeout)? {
-            if let CEvent::Key(key) = event::read()? {
-                app.handle_key(key)?;
+            match event::read()? {
+                CEvent::Key(key) => app.handle_key(key)?,
+                CEvent::Mouse(mouse) => {
+                    let area = terminal.size()?;
+                    handle_mouse_event(app, mouse, area.into())?;
+                }
+                _ => {}
             }
         }
         if last_draw.elapsed() >= tick {
@@ -136,6 +151,213 @@ fn app_loop(
     }
 
     Ok(())
+}
+
+const SKY_MOUSE_PICK_RADIUS: usize = 8;
+
+fn handle_mouse_event(app: &mut App, mouse: MouseEvent, area: Rect) -> io::Result<()> {
+    match mouse.kind {
+        MouseEventKind::Up(MouseButton::Left) => {
+            handle_mouse_click(app, mouse.column, mouse.row, area)
+        }
+        MouseEventKind::ScrollUp => handle_mouse_scroll(app, false),
+        MouseEventKind::ScrollDown => handle_mouse_scroll(app, true),
+        _ => Ok(()),
+    }
+}
+
+fn handle_mouse_scroll(app: &mut App, down: bool) -> io::Result<()> {
+    if app.help {
+        return Ok(());
+    }
+    match app.screen {
+        Screen::Search => {
+            if down {
+                if !app.search.results.is_empty() {
+                    app.select_search_result(app.search.selected.saturating_add(1));
+                }
+            } else {
+                app.select_search_result(app.search.selected.saturating_sub(1));
+            }
+        }
+        Screen::Settings => {
+            let index = if down {
+                app.settings.selected.saturating_add(1)
+            } else {
+                app.settings.selected.saturating_sub(1)
+            };
+            app.select_setting(index);
+        }
+        Screen::Setup => {
+            app.move_setup_field(if down { 1 } else { 0 });
+        }
+        Screen::Sky => {}
+    }
+    Ok(())
+}
+
+fn handle_mouse_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    if app.help {
+        app.help = false;
+        return Ok(());
+    }
+
+    match app.screen {
+        Screen::Search => handle_search_click(app, column, row, area),
+        Screen::Settings => handle_settings_click(app, column, row, area),
+        Screen::Setup => handle_setup_click(app, column, row, area),
+        Screen::Sky => handle_canvas_click(app, column, row, area),
+    }
+}
+
+fn handle_search_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    let modal = search_modal_inner(area);
+    if !rect_contains(modal, column, row) {
+        return Ok(());
+    }
+    let local_row = row.saturating_sub(modal.y);
+    if local_row >= 2 {
+        let index = local_row.saturating_sub(2) as usize;
+        if index < app.search.results.len().min(10) {
+            app.activate_search_result(index)?;
+        }
+    }
+    Ok(())
+}
+
+fn handle_settings_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    let modal = settings_modal_inner(area);
+    if !rect_contains(modal, column, row) {
+        return Ok(());
+    }
+    let index = row.saturating_sub(modal.y) as usize;
+    if index < app::settings_count() {
+        app.select_setting(index);
+        let forward = column >= modal.x.saturating_add(modal.width / 2);
+        app.adjust_setting(forward)?;
+    }
+    Ok(())
+}
+
+fn handle_setup_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    let modal = setup_modal_inner(area);
+    if !rect_contains(modal, column, row) {
+        return Ok(());
+    }
+    match row.saturating_sub(modal.y) {
+        2 => {
+            app.move_setup_field(0);
+            let forward = column >= modal.x.saturating_add(modal.width / 2);
+            app.cycle_preset(forward);
+        }
+        9 => {
+            app.move_setup_field(1);
+            app.commit_setup()?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_canvas_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    let layout = sky_layout(area, app);
+    if rect_contains(layout.footer, column, row) {
+        return handle_footer_click(app, column, layout.footer);
+    }
+    let Some((x, y)) = rect_local(layout.canvas_inner, column, row) else {
+        return Ok(());
+    };
+    if app.horizon_transition().is_some() {
+        return Ok(());
+    }
+
+    match app.view_mode {
+        ViewMode::Sky => {
+            if let Some(code) = sky_constellation_label_hit(
+                app,
+                layout.canvas_inner.width as usize,
+                layout.canvas_inner.height as usize,
+                x,
+                y,
+            ) {
+                app.select_constellation_code(code);
+            } else {
+                app.activate_pointer_at(x, y, SKY_MOUSE_PICK_RADIUS);
+            }
+        }
+        ViewMode::Ground => {
+            if let Some(index) = ground_city_hit(
+                app,
+                layout.canvas_inner.width as usize,
+                layout.canvas_inner.height as usize,
+                x,
+                y,
+            ) {
+                app.apply_ground_city(index)?;
+            } else if let Some(globe) = globe_projection(
+                app,
+                layout.canvas_inner.width as usize,
+                layout.canvas_inner.height as usize,
+            ) && let Some((lon, lat)) = globe.lon_lat_at(x, y)
+            {
+                app.preview_ground_location(lat, lon);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_footer_click(app: &mut App, column: u16, footer: Rect) -> io::Result<()> {
+    if footer.width < 3 {
+        return Ok(());
+    }
+    let local_x = column.saturating_sub(footer.x);
+    let third = footer.width / 3;
+    if local_x < third {
+        match app.view_mode {
+            ViewMode::Sky => app.open_sky_search(),
+            ViewMode::Ground => app.open_city_search(),
+        }
+    } else if local_x < third.saturating_mul(2) {
+        app.toggle_ground_sky();
+    } else {
+        app.screen = Screen::Settings;
+        app.message.clear();
+    }
+    Ok(())
+}
+
+fn search_modal_inner(area: Rect) -> Rect {
+    centered_rect(area, 58, 18).inner(Margin {
+        horizontal: 2,
+        vertical: 2,
+    })
+}
+
+fn settings_modal_inner(area: Rect) -> Rect {
+    centered_rect(area, 60, 19).inner(Margin {
+        horizontal: 2,
+        vertical: 2,
+    })
+}
+
+fn setup_modal_inner(area: Rect) -> Rect {
+    Block::default()
+        .borders(Borders::ALL)
+        .inner(centered_rect(area, 78, 22))
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.left() && column < rect.right() && row >= rect.top() && row < rect.bottom()
+}
+
+fn rect_local(rect: Rect, column: u16, row: u16) -> Option<(usize, usize)> {
+    rect_contains(rect, column, row).then(|| {
+        (
+            column.saturating_sub(rect.x) as usize,
+            row.saturating_sub(rect.y) as usize,
+        )
+    })
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -224,35 +446,32 @@ fn palette(theme: Theme) -> Palette {
     }
 }
 
-fn draw_sky(frame: &mut Frame, app: &mut App, palette: Palette) {
-    let area = frame.area();
-    frame.render_widget(
-        Block::default().style(Style::default().bg(palette.bg)),
-        area,
-    );
+#[derive(Debug, Clone, Copy)]
+struct SkyLayout {
+    header: Rect,
+    canvas_outer: Rect,
+    canvas_inner: Rect,
+    footer: Rect,
+    side_panel: Option<Rect>,
+}
 
+fn sky_layout(area: Rect, app: &App) -> SkyLayout {
     let wants_panel = app.config.display.side_panel;
-
-    if wants_panel && area.width >= 94 {
+    let (sky_column, side_panel) = if wants_panel && area.width >= 94 {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(54), Constraint::Length(36)])
             .split(area);
-        draw_sky_column(frame, app, chunks[0], palette);
-        draw_side_panel(frame, app, chunks[1], palette);
+        (chunks[0], Some(chunks[1]))
     } else if wants_panel && area.height >= 28 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(16), Constraint::Length(10)])
             .split(area);
-        draw_sky_column(frame, app, chunks[0], palette);
-        draw_side_panel(frame, app, chunks[1], palette);
+        (chunks[0], Some(chunks[1]))
     } else {
-        draw_sky_column(frame, app, area, palette);
-    }
-}
-
-fn draw_sky_column(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
+        (area, None)
+    };
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -260,16 +479,55 @@ fn draw_sky_column(frame: &mut Frame, app: &mut App, area: Rect, palette: Palett
             Constraint::Min(8),
             Constraint::Length(2),
         ])
-        .split(area);
-    draw_header(frame, app, rows[0], palette);
-    if app.horizon_transition().is_some() {
-        draw_horizon_canvas(frame, app, rows[1], palette);
-    } else if app.view_mode == ViewMode::Ground {
-        draw_ground_canvas(frame, app, rows[1], palette);
-    } else {
-        draw_star_canvas(frame, app, rows[1], palette);
+        .split(sky_column);
+    let canvas_inner = Block::default().borders(Borders::ALL).inner(rows[1]);
+    SkyLayout {
+        header: rows[0],
+        canvas_outer: rows[1],
+        canvas_inner,
+        footer: rows[2],
+        side_panel,
     }
-    draw_footer(frame, app, rows[2], palette);
+}
+
+fn draw_sky(frame: &mut Frame, app: &mut App, palette: Palette) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.bg)),
+        area,
+    );
+
+    let layout = sky_layout(area, app);
+    draw_sky_column_parts(
+        frame,
+        app,
+        layout.header,
+        layout.canvas_outer,
+        layout.footer,
+        palette,
+    );
+    if let Some(side_panel) = layout.side_panel {
+        draw_side_panel(frame, app, side_panel, palette);
+    }
+}
+
+fn draw_sky_column_parts(
+    frame: &mut Frame,
+    app: &mut App,
+    header: Rect,
+    canvas: Rect,
+    footer: Rect,
+    palette: Palette,
+) {
+    draw_header(frame, app, header, palette);
+    if app.horizon_transition().is_some() {
+        draw_horizon_canvas(frame, app, canvas, palette);
+    } else if app.view_mode == ViewMode::Ground {
+        draw_ground_canvas(frame, app, canvas, palette);
+    } else {
+        draw_star_canvas(frame, app, canvas, palette);
+    }
+    draw_footer(frame, app, footer, palette);
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
@@ -532,8 +790,7 @@ fn horizon_transition_grid(
     };
     let final_sky = sky_canvas_grid(app, width, height, palette);
     let globe = globe_layer_grid(app, width, height, palette);
-    let globe_projection =
-        GlobeProjection::new(width, height, app.ground.cursor_lat, app.ground.cursor_lon);
+    let globe_projection = globe_projection(app, width, height);
     let ground = ground_grid(app, width, height, palette);
     let look_up = match (from, to) {
         (ViewMode::Sky, ViewMode::Ground) => 1.0 - progress,
@@ -782,7 +1039,7 @@ fn horizon_sky_project(
     let y_radius = center_y.max(1.0);
     let scale = lerp_f64(1.58, 1.0, shape_progress);
     let azimuth = azimuth.to_radians();
-    let x = center_x + azimuth.sin() * radius * x_radius * scale;
+    let x = center_x - azimuth.sin() * radius * x_radius * scale;
     let y = center_y - azimuth.cos() * radius * y_radius * scale;
 
     if !x.is_finite() || !y.is_finite() {
@@ -802,11 +1059,8 @@ fn horizon_observer_location(app: &App, progress: f64) -> Location {
     let from = antipode_location(app);
     let to = app.render_location();
     let t = progress.clamp(0.0, 1.0);
-    let longitude_direction = if app.ground.cursor_lon >= 0.0 {
-        1.0
-    } else {
-        -1.0
-    };
+    let (_, center_lon) = app.render_ground_center();
+    let longitude_direction = if center_lon >= 0.0 { 1.0 } else { -1.0 };
     Location {
         name: format!("{} -> {}", from.name, to.name),
         latitude: lerp_f64(from.latitude, to.latitude, t),
@@ -816,10 +1070,11 @@ fn horizon_observer_location(app: &App, progress: f64) -> Location {
 }
 
 fn antipode_location(app: &App) -> Location {
+    let (center_lat, center_lon) = app.render_ground_center();
     Location {
         name: "Antipode".to_string(),
-        latitude: -app.ground.cursor_lat,
-        longitude: normalize_degrees(app.ground.cursor_lon + 180.0),
+        latitude: -center_lat,
+        longitude: normalize_degrees(center_lon + 180.0),
         timezone: "UTC".to_string(),
     }
 }
@@ -855,14 +1110,17 @@ fn draw_globe_layer(
     palette: Palette,
     unicode: bool,
 ) {
-    if let Some(globe) =
-        GlobeProjection::new(width, height, app.ground.cursor_lat, app.ground.cursor_lon)
-    {
+    if let Some(globe) = globe_projection(app, width, height) {
         draw_globe_fill(grid, app, globe);
         draw_globe_graticule(grid, globe, palette, unicode);
         draw_preset_city_markers(grid, app, globe, palette, unicode);
         draw_globe_markers(grid, app, globe, palette, unicode);
     }
+}
+
+fn globe_projection(app: &App, width: usize, height: usize) -> Option<GlobeProjection> {
+    let (center_lat, center_lon) = app.render_ground_center();
+    GlobeProjection::new(width, height, center_lat, center_lon)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1150,6 +1408,74 @@ fn draw_preset_city_markers(
     }
 }
 
+fn ground_city_hit(app: &App, width: usize, height: usize, x: usize, y: usize) -> Option<usize> {
+    let globe = globe_projection(app, width, height)?;
+    let unicode = app.config.display.charset.canvas_unicode();
+    let empty = SkyCell {
+        ch: ' ',
+        style: Style::default(),
+    };
+    let grid = vec![vec![empty; width]; height];
+    let mut occupied = label_occupancy_grid(&grid);
+    reserve_globe_focus_labels(&mut occupied, app, globe, unicode);
+
+    let visible_cities = PRESETS
+        .iter()
+        .enumerate()
+        .filter(|(_, preset)| !preset.custom)
+        .filter_map(|(index, preset)| {
+            globe
+                .project(preset.longitude, preset.latitude)
+                .map(|(marker_x, marker_y)| (index, preset, marker_x, marker_y))
+        })
+        .collect::<Vec<_>>();
+
+    for (_, _, marker_x, marker_y) in &visible_cities {
+        reserve_marker_cells(&mut occupied, *marker_x, *marker_y, 0);
+    }
+
+    let mut nearest_marker = None;
+    for (index, _, marker_x, marker_y) in &visible_cities {
+        let distance = marker_x.abs_diff(x).pow(2) + marker_y.abs_diff(y).pow(2);
+        if distance <= 2 {
+            nearest_marker = match nearest_marker {
+                Some((best_distance, best_index)) if best_distance <= distance => {
+                    Some((best_distance, best_index))
+                }
+                _ => Some((distance, *index)),
+            };
+        }
+    }
+    if let Some((_, index)) = nearest_marker {
+        return Some(index);
+    }
+
+    for (index, preset, marker_x, marker_y) in visible_cities {
+        let is_preview = preset_matches_location(preset, &app.ground.preview_location);
+        let is_saved = preset_matches_location(preset, &app.config.location);
+        if is_preview || is_saved {
+            continue;
+        }
+
+        let label = preset_city_label(preset, app.config.language, unicode);
+        let label_width = canvas_label_width(label, unicode);
+        if label_width == 0 {
+            continue;
+        }
+        let Some((label_x, label_y)) =
+            city_label_position(&occupied, marker_x, marker_y, label_width)
+        else {
+            continue;
+        };
+        if y == label_y && x >= label_x && x < label_x.saturating_add(label_width) {
+            return Some(index);
+        }
+        reserve_label_cells(&mut occupied, label_x, label_y, label_width);
+    }
+
+    None
+}
+
 fn label_occupancy_grid(grid: &[Vec<SkyCell>]) -> Vec<Vec<bool>> {
     let width = grid.first().map_or(0, Vec::len);
     vec![vec![false; width]; grid.len()]
@@ -1370,7 +1696,7 @@ fn horizon_path_motion_vector(app: &App) -> MotionVector {
         MotionVector { x: 0.0, y: 1.0 }
     } else {
         MotionVector {
-            x: -x / length,
+            x: x / length,
             y: -y / length,
         }
     }
@@ -1384,7 +1710,7 @@ fn globe_motion_offset(
     height: usize,
     motion: MotionVector,
 ) -> (f64, f64) {
-    let travel = (width.max(height) as f64 * 0.78).max(height as f64 * 1.15);
+    let travel = globe_motion_travel(width, height, motion);
     let amount = match (from, to) {
         (ViewMode::Ground, ViewMode::Sky) => {
             smootherstep01((eased_progress / 0.42).clamp(0.0, 1.0))
@@ -1395,6 +1721,22 @@ fn globe_motion_offset(
         _ => 0.0,
     };
     (motion.x * travel * amount, motion.y * travel * amount)
+}
+
+fn globe_motion_travel(width: usize, height: usize, motion: MotionVector) -> f64 {
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let radius_y = ((height as f64 - 2.0) / 2.0)
+        .min((width as f64 - 4.0) / 4.0)
+        .max(1.0);
+    let radius_x = radius_y * 2.0;
+    let half_width = width.saturating_sub(1) as f64 / 2.0;
+    let half_height = height.saturating_sub(1) as f64 / 2.0;
+    let screen_support = motion.x.abs() * half_width + motion.y.abs() * half_height;
+    let globe_support = ((motion.x * radius_x).powi(2) + (motion.y * radius_y).powi(2)).sqrt();
+    let label_margin = 36.0;
+    screen_support + globe_support + label_margin
 }
 
 fn shifted_globe_cell(
@@ -2031,15 +2373,9 @@ fn draw_constellation_labels(
         return;
     }
 
-    let points = visible
-        .iter()
-        .map(|star| (star.star.hip, (star.x, star.y)))
-        .collect::<HashMap<_, _>>();
     let selected = app.selected_constellation_code();
-
-    for constellation in &app.constellation_lines {
-        let highlighted =
-            selected.is_some_and(|code| code.eq_ignore_ascii_case(constellation.code));
+    for hit in constellation_label_hits(visible, app, width, height, unicode) {
+        let highlighted = selected.is_some_and(|code| code.eq_ignore_ascii_case(&hit.code));
         let label_style = Style::default()
             .fg(if highlighted {
                 palette.selected
@@ -2048,36 +2384,113 @@ fn draw_constellation_labels(
             })
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
-        let mut endpoints = Vec::new();
+        draw_text(grid, hit.x, hit.y, &hit.code, label_style, unicode);
+    }
+}
 
-        for pair in constellation.hips.windows(2) {
-            let Some(&(x0, y0)) = points.get(&pair[0]) else {
-                continue;
-            };
-            let Some(&(x1, y1)) = points.get(&pair[1]) else {
-                continue;
-            };
-            endpoints.push((x0, y0));
-            endpoints.push((x1, y1));
-        }
+#[derive(Debug, Clone)]
+struct ConstellationLabelHit {
+    code: String,
+    x: usize,
+    y: usize,
+    width: usize,
+}
 
-        endpoints.sort_unstable();
-        endpoints.dedup();
-        if !endpoints.is_empty() {
+fn constellation_label_hits(
+    visible: &[astro::VisibleStar],
+    app: &App,
+    width: usize,
+    height: usize,
+    unicode: bool,
+) -> Vec<ConstellationLabelHit> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let points = visible
+        .iter()
+        .map(|star| (star.star.hip, (star.x, star.y)))
+        .collect::<HashMap<_, _>>();
+
+    app.constellation_lines
+        .iter()
+        .filter_map(|constellation| {
+            let mut endpoints = Vec::new();
+            for pair in constellation.hips.windows(2) {
+                let Some(&(x0, y0)) = points.get(&pair[0]) else {
+                    continue;
+                };
+                let Some(&(x1, y1)) = points.get(&pair[1]) else {
+                    continue;
+                };
+                endpoints.push((x0, y0));
+                endpoints.push((x1, y1));
+            }
+
+            endpoints.sort_unstable();
+            endpoints.dedup();
+            if endpoints.is_empty() {
+                return None;
+            }
+
             let sum_x = endpoints.iter().map(|(x, _)| *x).sum::<usize>();
             let sum_y = endpoints.iter().map(|(_, y)| *y).sum::<usize>();
-            let x = (sum_x / endpoints.len()).min(width.saturating_sub(1));
-            let y = (sum_y / endpoints.len()).min(height.saturating_sub(1));
-            draw_text(
-                grid,
-                x.saturating_add(1),
+            let x = (sum_x / endpoints.len()).min(width - 1);
+            let y = (sum_y / endpoints.len()).min(height - 1);
+            let label_x = x.saturating_add(1);
+            if label_x >= width {
+                return None;
+            }
+            let label_width = canvas_label_width(constellation.code, unicode).min(width - label_x);
+            (label_width > 0).then(|| ConstellationLabelHit {
+                code: constellation.code.to_string(),
+                x: label_x,
                 y,
-                constellation.code,
-                label_style,
-                unicode,
-            );
+                width: label_width,
+            })
+        })
+        .collect()
+}
+
+fn sky_constellation_label_hit(
+    app: &App,
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+) -> Option<String> {
+    if !app.config.display.constellations || !app.config.display.labels {
+        return None;
+    }
+
+    let unicode = app.config.display.charset.canvas_unicode();
+    let visible = sky_visible_for_hit(app, width, height);
+    constellation_label_hits(&visible, app, width, height, unicode)
+        .into_iter()
+        .find(|hit| {
+            let start = hit.x.saturating_sub(1);
+            let end = hit.x.saturating_add(hit.width).saturating_add(1).min(width);
+            y == hit.y && x >= start && x < end
+        })
+        .map(|hit| hit.code)
+}
+
+fn sky_visible_for_hit(app: &App, width: usize, height: usize) -> Vec<astro::VisibleStar> {
+    if app.should_render_zoomed_sky() && app.zoom_render_code().is_some() {
+        if let Some(view) = app.zoom_render_view(width, height) {
+            return view.stars;
         }
     }
+
+    let sky_location = app.render_location();
+    astro::visible_stars(
+        &app.catalog.stars,
+        &sky_location,
+        app.now(),
+        app.config.display.limiting_magnitude,
+        width,
+        height,
+    )
 }
 
 fn draw_deep_sky<F>(
@@ -3179,12 +3592,22 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
     } else {
         format!("{}   ·   {}", app.message, i18n::tr(language, footer_key))
     };
+    let mouse = footer_mouse_line(language, compact).to_string();
     frame.render_widget(
-        Paragraph::new(text)
+        Paragraph::new(vec![Line::from(text), Line::from(mouse)])
             .alignment(Alignment::Center)
             .style(Style::default().fg(palette.muted).bg(palette.bg)),
         area,
     );
+}
+
+fn footer_mouse_line(language: Language, compact: bool) -> &'static str {
+    match (language, compact) {
+        (Language::Zh, true) => "鼠标: 左搜索 · 中翻转 · 右设置",
+        (Language::Zh, false) => "鼠标: 左侧搜索 · 中间地图/星空 · 右侧设置",
+        (Language::En, true) => "mouse: left search · center flip · right settings",
+        (Language::En, false) => "mouse: left search · center map/sky · right settings",
+    }
 }
 
 fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
@@ -3711,6 +4134,7 @@ fn help_columns_for_view(
                 help_item("s", "位置 / 搜索城市", palette),
                 help_item("o", "设置面板", palette),
                 help_item("x", "指针模式", palette),
+                help_item("鼠标", "点天体或标签选中", palette),
                 help_item("?", "关闭帮助", palette),
                 Line::from(""),
                 help_section("时间", palette),
@@ -3748,6 +4172,7 @@ fn help_columns_for_view(
                 help_item("/", "搜索城市", palette),
                 help_item("s", "保存预览点", palette),
                 help_item("o", "设置面板", palette),
+                help_item("鼠标", "点城市 / 点地球定位", palette),
                 help_item("?", "关闭帮助", palette),
                 Line::from(""),
                 help_section("时间", palette),
@@ -3785,6 +4210,7 @@ fn help_columns_for_view(
                 help_item("s", "location / city search", palette),
                 help_item("o", "settings panel", palette),
                 help_item("x", "pointer mode", palette),
+                help_item("mouse", "pick object or label", palette),
                 help_item("?", "close help", palette),
                 Line::from(""),
                 help_section("Time", palette),
@@ -3822,6 +4248,7 @@ fn help_columns_for_view(
                 help_item("/", "search city", palette),
                 help_item("s", "save preview", palette),
                 help_item("o", "settings panel", palette),
+                help_item("mouse", "pick city / place cursor", palette),
                 help_item("?", "close help", palette),
                 Line::from(""),
                 help_section("Time", palette),
@@ -3899,7 +4326,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::TimeZone;
-    use crossterm::event::{KeyCode, KeyEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
     use unicode_width::UnicodeWidthStr;
 
@@ -4049,6 +4476,46 @@ mod tests {
     }
 
     #[test]
+    fn footer_renders_mouse_hint_line() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(
+            text.contains("mouse:"),
+            "footer should expose mouse interaction hints\n{text}"
+        );
+    }
+
+    #[test]
+    fn sky_label_click_selects_constellation() {
+        let mut app = app_for_test(false);
+        let area = Rect::new(0, 0, 120, 36);
+        let layout = sky_layout(area, &app);
+        let width = layout.canvas_inner.width as usize;
+        let height = layout.canvas_inner.height as usize;
+        let unicode = app.config.display.charset.canvas_unicode();
+        let visible = sky_visible_for_hit(&app, width, height);
+        let hit = constellation_label_hits(&visible, &app, width, height, unicode)
+            .into_iter()
+            .next()
+            .expect("test sky should render at least one constellation label");
+        let code = hit.code.clone();
+
+        handle_mouse_click(
+            &mut app,
+            layout.canvas_inner.x + hit.x as u16,
+            layout.canvas_inner.y + hit.y as u16,
+            area,
+        )
+        .unwrap();
+
+        assert_eq!(app.selected_constellation_code(), Some(code.as_str()));
+        assert!(!app.pointer.active);
+    }
+
+    #[test]
     fn ground_footer_and_legend_use_globe_text() {
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4143,6 +4610,257 @@ mod tests {
     }
 
     #[test]
+    fn ground_city_hit_selects_visible_city_marker() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = false;
+        app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
+        app.ground = app::GroundState {
+            cursor_lat: 35.0,
+            cursor_lon: 105.0,
+            preview_location: Location {
+                name: "Asia".to_string(),
+                latitude: 35.0,
+                longitude: 105.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+        let width = 120usize;
+        let height = 32usize;
+        let beijing = PRESETS
+            .iter()
+            .position(|preset| preset.en == "Beijing")
+            .unwrap();
+        let globe = globe_projection(&app, width, height).unwrap();
+        let (x, y) = globe
+            .project(PRESETS[beijing].longitude, PRESETS[beijing].latitude)
+            .unwrap();
+
+        assert_eq!(ground_city_hit(&app, width, height, x, y), Some(beijing));
+    }
+
+    #[test]
+    fn ground_canvas_click_rotates_to_clicked_point() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = false;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 0.0,
+            cursor_lon: 0.0,
+            preview_location: Location {
+                name: "Equator".to_string(),
+                latitude: 0.0,
+                longitude: 0.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+        let area = Rect::new(0, 0, 120, 36);
+        let layout = sky_layout(area, &app);
+        let globe = globe_projection(
+            &app,
+            layout.canvas_inner.width as usize,
+            layout.canvas_inner.height as usize,
+        )
+        .unwrap();
+        let (x, y) = globe.project(60.0, 0.0).unwrap();
+        let (clicked_lon, clicked_lat) = globe.lon_lat_at(x, y).unwrap();
+
+        handle_mouse_click(
+            &mut app,
+            layout.canvas_inner.x + x as u16,
+            layout.canvas_inner.y + y as u16,
+            area,
+        )
+        .unwrap();
+
+        assert!((app.ground.cursor_lat - clicked_lat).abs() < 1.0);
+        assert!((app.ground.cursor_lon - clicked_lon).abs() < 1.5);
+    }
+
+    #[test]
+    fn ground_city_click_animates_to_city() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = true;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 35.0,
+            cursor_lon: 105.0,
+            preview_location: Location {
+                name: "Asia".to_string(),
+                latitude: 35.0,
+                longitude: 105.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+        let area = Rect::new(0, 0, 120, 36);
+        let layout = sky_layout(area, &app);
+        let beijing = PRESETS
+            .iter()
+            .position(|preset| preset.en == "Beijing")
+            .unwrap();
+        let globe = globe_projection(
+            &app,
+            layout.canvas_inner.width as usize,
+            layout.canvas_inner.height as usize,
+        )
+        .unwrap();
+        let (x, y) = globe
+            .project(PRESETS[beijing].longitude, PRESETS[beijing].latitude)
+            .unwrap();
+
+        handle_mouse_click(
+            &mut app,
+            layout.canvas_inner.x + x as u16,
+            layout.canvas_inner.y + y as u16,
+            area,
+        )
+        .unwrap();
+
+        assert_eq!(app.ground.preview_location.name, "Beijing");
+        assert!((app.ground.cursor_lon - PRESETS[beijing].longitude).abs() < 0.001);
+        let (render_lat, render_lon) = app.render_ground_center();
+        assert!((render_lat - app.ground.cursor_lat).abs() > 0.1);
+        assert!((render_lon - app.ground.cursor_lon).abs() > 0.1);
+    }
+
+    #[test]
+    fn ground_mouse_down_up_rotates_once() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = false;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 0.0,
+            cursor_lon: 0.0,
+            preview_location: Location {
+                name: "Equator".to_string(),
+                latitude: 0.0,
+                longitude: 0.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+        let area = Rect::new(0, 0, 120, 36);
+        let layout = sky_layout(area, &app);
+        let globe = globe_projection(
+            &app,
+            layout.canvas_inner.width as usize,
+            layout.canvas_inner.height as usize,
+        )
+        .unwrap();
+        let (x, y) = globe.project(60.0, 0.0).unwrap();
+        let column = layout.canvas_inner.x + x as u16;
+        let row = layout.canvas_inner.y + y as u16;
+
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        )
+        .unwrap();
+        assert_eq!(app.ground.cursor_lon, 0.0);
+
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        )
+        .unwrap();
+        let lon_after_first_click = app.ground.cursor_lon;
+
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        )
+        .unwrap();
+
+        assert_eq!(app.ground.cursor_lon, lon_after_first_click);
+    }
+
+    #[test]
+    fn preview_ground_location_animates_render_center() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = true;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 0.0,
+            cursor_lon: 0.0,
+            preview_location: Location {
+                name: "Equator".to_string(),
+                latitude: 0.0,
+                longitude: 0.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+
+        app.preview_ground_location(0.0, 80.0);
+
+        let (_, render_lon) = app.render_ground_center();
+        assert_eq!(app.ground.cursor_lon, 80.0);
+        assert!(render_lon.abs() < 80.0);
+    }
+
+    #[test]
+    fn ground_backdrop_uses_animated_render_center() {
+        let mut app = app_for_test(false);
+        app.config.display.animations = true;
+        app.view_mode = ViewMode::Ground;
+        app.ground = app::GroundState {
+            cursor_lat: 0.0,
+            cursor_lon: 0.0,
+            preview_location: Location {
+                name: "Equator".to_string(),
+                latitude: 0.0,
+                longitude: 0.0,
+                timezone: "UTC".to_string(),
+            },
+        };
+
+        app.preview_ground_location(0.0, 80.0);
+
+        let (render_lat, render_lon) = app.render_ground_center();
+        let backdrop = antipode_location(&app);
+        assert!((backdrop.latitude + render_lat).abs() < 0.001);
+        assert!(
+            normalize_degrees(backdrop.longitude - normalize_degrees(render_lon + 180.0)).abs()
+                < 0.001
+        );
+        assert!(
+            normalize_degrees(
+                backdrop.longitude - normalize_degrees(app.ground.cursor_lon + 180.0)
+            )
+            .abs()
+                > 10.0
+        );
+    }
+
+    #[test]
+    fn search_result_click_activates_city() {
+        let mut app = app_for_test(true);
+        let area = Rect::new(0, 0, 120, 36);
+        let modal = search_modal_inner(area);
+
+        handle_mouse_click(&mut app, modal.x + 2, modal.y + 3, area).unwrap();
+
+        assert_eq!(app.screen, Screen::Sky);
+        assert_eq!(app.view_mode, ViewMode::Ground);
+        assert_eq!(app.ground.preview_location.name, PRESETS[1].en);
+    }
+
+    #[test]
     fn horizon_globe_motion_uses_opposite_side_of_sky_path() {
         let mut app = app_for_test(false);
         app.ground = app::GroundState {
@@ -4156,12 +4874,23 @@ mod tests {
             },
         };
         let east = horizon_path_motion_vector(&app);
-        assert!(east.x < 0.0);
+        assert!(east.x > 0.0);
 
         app.ground.cursor_lon = -100.0;
         app.ground.preview_location.longitude = -100.0;
         let west = horizon_path_motion_vector(&app);
-        assert!(west.x > 0.0);
+        assert!(west.x < 0.0);
+    }
+
+    #[test]
+    fn horizon_projection_uses_look_up_handedness() {
+        let width = 81;
+        let height = 25;
+        let center_x = width / 2;
+        let (east_x, _) = horizon_sky_project(0.0, 90.0, width, height, 1.0).unwrap();
+        let (west_x, _) = horizon_sky_project(0.0, 270.0, width, height, 1.0).unwrap();
+        assert!(east_x < center_x);
+        assert!(west_x > center_x);
     }
 
     #[test]
@@ -4185,6 +4914,70 @@ mod tests {
         assert!(ground_start < ground_mid && ground_mid < ground_gone);
         assert!((ground_gone - sky_waiting).abs() < 1.0);
         assert!(sky_waiting > sky_mid && sky_mid > sky_arrived);
+    }
+
+    #[test]
+    fn horizon_globe_offset_fully_clears_canvas_edges() {
+        let mut app = app_for_test(false);
+        app.view_mode = ViewMode::Ground;
+        let directions = [
+            MotionVector { x: 1.0, y: 0.0 },
+            MotionVector { x: -1.0, y: 0.0 },
+            MotionVector { x: 0.0, y: 1.0 },
+            MotionVector { x: 0.0, y: -1.0 },
+            MotionVector {
+                x: std::f64::consts::FRAC_1_SQRT_2,
+                y: std::f64::consts::FRAC_1_SQRT_2,
+            },
+            MotionVector {
+                x: -std::f64::consts::FRAC_1_SQRT_2,
+                y: std::f64::consts::FRAC_1_SQRT_2,
+            },
+        ];
+
+        for (width, height) in [(120usize, 36usize), (200, 60), (80, 24)] {
+            let palette = palette(Theme::Midnight);
+            let globe_layer = globe_layer_grid(&app, width, height, palette);
+            let globe = globe_projection(&app, width, height);
+            let empty = SkyCell {
+                ch: ' ',
+                style: Style::default().fg(palette.muted).bg(palette.bg),
+            };
+
+            for motion in directions {
+                let (offset_x, offset_y) = globe_motion_offset(
+                    ViewMode::Ground,
+                    ViewMode::Sky,
+                    0.42,
+                    width,
+                    height,
+                    motion,
+                );
+                let mut visible_cells = 0usize;
+                for y in 0..height {
+                    for x in 0..width {
+                        let cell = shifted_globe_cell(
+                            &globe_layer,
+                            globe,
+                            x,
+                            y,
+                            offset_x,
+                            offset_y,
+                            empty,
+                        )
+                        .unwrap_or(empty);
+                        if cell.ch != ' ' || cell.style.bg != Some(palette.bg) {
+                            visible_cells += 1;
+                        }
+                    }
+                }
+
+                assert_eq!(
+                    visible_cells, 0,
+                    "globe should fully clear {width}x{height} toward {motion:?}"
+                );
+            }
+        }
     }
 
     #[test]
