@@ -3929,6 +3929,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
     let area = centered_rect(frame.area(), 60, 19);
     dim_modal_background(frame, area, palette);
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .title(format!(" {} ", i18n::tr(language, "settings")))
         .title_style(
@@ -3937,7 +3938,8 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.cyan));
+        .border_style(Style::default().fg(palette.cyan))
+        .style(Style::default().bg(palette.panel));
     let inner = block.inner(area).inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -3972,7 +3974,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
 
     frame.render_widget(
         Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver))
+            .style(Style::default().fg(palette.silver).bg(palette.panel))
             .wrap(Wrap { trim: false }),
         inner,
     );
@@ -4584,6 +4586,28 @@ mod tests {
         assert!(text.contains("horizon"));
         assert!(text.contains(i18n::tr(Language::En, "sky_orientation")));
         assert!(text.contains("observer"));
+    }
+
+    #[test]
+    fn settings_modal_uses_opaque_panel_background() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.screen = Screen::Settings;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let modal = centered_rect(Rect::new(0, 0, 80, 24), 60, 19);
+        let test_palette = palette(app.config.display.theme);
+        for y in modal.top()..modal.bottom() {
+            for x in modal.left()..modal.right() {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    test_palette.panel,
+                    "settings modal cell at ({x}, {y}) should use panel background"
+                );
+            }
+        }
     }
 
     #[test]
