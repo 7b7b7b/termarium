@@ -3697,10 +3697,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
 
 fn footer_mouse_line(language: Language, compact: bool) -> &'static str {
     match (language, compact) {
-        (Language::Zh, true) => "鼠标: 左搜索 · 中翻转 · 右设置",
-        (Language::Zh, false) => "鼠标: 左侧搜索 · 中间地图/星空 · 右侧设置",
+        (Language::Zh, true) => "鼠标: 左搜索 · 中切换 · 右设置",
+        (Language::Zh, false) => "鼠标: 左搜索 · 中切换视图 · 右设置",
         (Language::En, true) => "mouse: left search · center flip · right settings",
-        (Language::En, false) => "mouse: left search · center map/sky · right settings",
+        (Language::En, false) => "mouse: left search · center flip · right settings",
     }
 }
 
@@ -4224,154 +4224,146 @@ fn help_columns_for_view(
     match (language, view_mode) {
         (Language::Zh, ViewMode::Sky) => (
             vec![
-                help_section("导航", palette),
-                help_item("q", "退出 / 退放大", palette),
-                help_item("Esc", "取消选中 / 退出", palette),
-                help_item("g", "进入地球", palette),
-                help_item("←/→", "切换城市", palette),
-                help_item("Tab", "下个可见星座", palette),
-                help_item("S-Tab", "上个可见星座", palette),
-                help_item("z", "放大星座", palette),
+                help_section("常用", palette),
                 help_item("/", "搜索天体", palette),
-                help_item("s", "位置 / 搜索城市", palette),
-                help_item("o", "设置面板", palette),
-                help_item("x", "指针模式", palette),
-                help_item("鼠标", "点天体或标签选中", palette),
-                help_item("?", "关闭帮助", palette),
+                help_item("g", "地球/星空", palette),
+                help_item("s", "位置/城市", palette),
+                help_item("o", "设置", palette),
+                help_item("q", "退出", palette),
+                help_item("Esc", "取消/退出", palette),
+                help_item("?", "帮助", palette),
                 Line::from(""),
                 help_section("时间", palette),
-                help_item("space", "暂停 / 回实时", palette),
+                help_item("space", "暂停/实时", palette),
                 help_item("[ / ]", "前后一小时", palette),
                 help_item("{ / }", "前后一天", palette),
                 help_item("r", "回到实时", palette),
             ],
             vec![
-                help_section("面板和模式", palette),
+                help_section("星空进阶", palette),
+                help_item("x", "指针", palette),
+                help_item("z", "放大星座", palette),
+                help_item("Tab", "下个星座", palette),
+                help_item("S-Tab", "上个星座", palette),
                 help_item("h", "今晚推荐", palette),
                 help_item("v", "城市巡游", palette),
+                help_item("鼠标", "点天体/标签", palette),
+                Line::from(""),
+                help_section("显示/设置", palette),
                 help_item("m", "月相面板", palette),
                 help_item("l", "星名标签", palette),
                 help_item("c", "星座连线", palette),
                 help_item("p", "行星", palette),
                 help_item("d", "深空天体", palette),
                 help_item("a", "动效", palette),
-                Line::from(""),
-                help_section("外观和设置", palette),
+                help_item("+ / -", "星等", palette),
                 help_item("t", "中英文", palette),
                 help_item("T", "主题", palette),
                 help_item("u", "字符集", palette),
-                help_item("+ / -", "极限星等", palette),
-                help_item("o", "不常用设置", palette),
             ],
         ),
         (Language::Zh, ViewMode::Ground) => (
             vec![
-                help_section("地球导航", palette),
-                help_item("q/Esc", "退出", palette),
-                help_item("g", "回到星空", palette),
-                help_item("←/→", "旋转经度", palette),
-                help_item("↑/↓", "调整纬度", palette),
+                help_section("常用", palette),
                 help_item("/", "搜索城市", palette),
+                help_item("g", "回到星空", palette),
                 help_item("s", "保存预览点", palette),
-                help_item("o", "设置面板", palette),
-                help_item("鼠标", "点城市 / 点地球定位", palette),
-                help_item("?", "关闭帮助", palette),
+                help_item("o", "设置", palette),
+                help_item("q/Esc", "退出", palette),
+                help_item("?", "帮助", palette),
                 Line::from(""),
                 help_section("时间", palette),
-                help_item("space", "暂停 / 回实时", palette),
+                help_item("space", "暂停/实时", palette),
                 help_item("[ / ]", "前后一小时", palette),
                 help_item("{ / }", "前后一天", palette),
                 help_item("r", "回到实时", palette),
             ],
             vec![
-                help_section("地球视图", palette),
-                help_item("准星", "当前预览观测点", palette),
-                help_item("明暗", "太阳照射亮度", palette),
-                help_item("星幕", "地球背面天空", palette),
-                help_item("s", "进入设置后确认保存", palette),
+                help_section("地球进阶", palette),
+                help_item("←/→", "旋转经度", palette),
+                help_item("↑/↓", "调整纬度", palette),
+                help_item("鼠标", "点城市/定位", palette),
+                help_item("准星", "当前预览点", palette),
+                help_item("明暗", "太阳照明", palette),
+                help_item("星幕", "背面星空", palette),
                 Line::from(""),
-                help_section("外观和设置", palette),
+                help_section("显示/设置", palette),
                 help_item("t", "中英文", palette),
                 help_item("T", "主题", palette),
                 help_item("u", "字符集", palette),
                 help_item("a", "动效", palette),
-                help_item("o", "不常用设置", palette),
             ],
         ),
         (Language::En, ViewMode::Sky) => (
             vec![
-                help_section("Navigation", palette),
-                help_item("q", "quit / exit zoom", palette),
-                help_item("Esc", "clear / quit", palette),
-                help_item("g", "open globe", palette),
-                help_item("←/→", "switch city", palette),
-                help_item("Tab", "next constellation", palette),
-                help_item("S-Tab", "previous constellation", palette),
-                help_item("z", "zoom constellation", palette),
+                help_section("Common", palette),
                 help_item("/", "search object", palette),
-                help_item("s", "location / city search", palette),
-                help_item("o", "settings panel", palette),
-                help_item("x", "pointer mode", palette),
-                help_item("mouse", "pick object or label", palette),
-                help_item("?", "close help", palette),
+                help_item("g", "globe/sky", palette),
+                help_item("s", "location/city", palette),
+                help_item("o", "settings", palette),
+                help_item("q", "quit", palette),
+                help_item("Esc", "clear/quit", palette),
+                help_item("?", "help", palette),
                 Line::from(""),
                 help_section("Time", palette),
-                help_item("space", "pause / live", palette),
+                help_item("space", "pause/live", palette),
                 help_item("[ / ]", "one hour", palette),
                 help_item("{ / }", "one day", palette),
                 help_item("r", "return live", palette),
             ],
             vec![
-                help_section("Panels and Modes", palette),
+                help_section("Sky Tools", palette),
+                help_item("x", "pointer", palette),
+                help_item("z", "zoom constellation", palette),
+                help_item("Tab", "next constellation", palette),
+                help_item("S-Tab", "previous constellation", palette),
                 help_item("h", "tonight", palette),
                 help_item("v", "city tour", palette),
+                help_item("mouse", "pick object/label", palette),
+                Line::from(""),
+                help_section("Display", palette),
                 help_item("m", "moon panel", palette),
                 help_item("l", "star labels", palette),
                 help_item("c", "constellation lines", palette),
                 help_item("p", "planets", palette),
                 help_item("d", "deep sky", palette),
                 help_item("a", "animations", palette),
-                Line::from(""),
-                help_section("Display and Settings", palette),
+                help_item("+ / -", "magnitude", palette),
                 help_item("t", "language", palette),
                 help_item("T", "theme", palette),
                 help_item("u", "charset", palette),
-                help_item("+ / -", "limiting mag", palette),
-                help_item("o", "less-used settings", palette),
             ],
         ),
         (Language::En, ViewMode::Ground) => (
             vec![
-                help_section("Globe Navigation", palette),
-                help_item("q/Esc", "quit", palette),
-                help_item("g", "return to sky", palette),
-                help_item("←/→", "rotate longitude", palette),
-                help_item("↑/↓", "adjust latitude", palette),
+                help_section("Common", palette),
                 help_item("/", "search city", palette),
+                help_item("g", "return to sky", palette),
                 help_item("s", "save preview", palette),
-                help_item("o", "settings panel", palette),
-                help_item("mouse", "pick city / place cursor", palette),
-                help_item("?", "close help", palette),
+                help_item("o", "settings", palette),
+                help_item("q/Esc", "quit", palette),
+                help_item("?", "help", palette),
                 Line::from(""),
                 help_section("Time", palette),
-                help_item("space", "pause / live", palette),
+                help_item("space", "pause/live", palette),
                 help_item("[ / ]", "one hour", palette),
                 help_item("{ / }", "one day", palette),
                 help_item("r", "return live", palette),
             ],
             vec![
-                help_section("Globe View", palette),
+                help_section("Globe Tools", palette),
+                help_item("←/→", "rotate longitude", palette),
+                help_item("↑/↓", "adjust latitude", palette),
+                help_item("mouse", "pick city/place cursor", palette),
                 help_item("cross", "preview observer", palette),
                 help_item("shade", "sunlight brightness", palette),
                 help_item("stars", "opposite sky", palette),
-                help_item("s", "confirm save in setup", palette),
                 Line::from(""),
-                help_section("Display and Settings", palette),
+                help_section("Display", palette),
                 help_item("t", "language", palette),
                 help_item("T", "theme", palette),
                 help_item("u", "charset", palette),
                 help_item("a", "animations", palette),
-                help_item("o", "less-used settings", palette),
             ],
         ),
     }
@@ -4595,27 +4587,59 @@ mod tests {
     }
 
     #[test]
-    fn footer_mentions_magnitude_constellation_lines_and_globe() {
-        assert!(i18n::tr(Language::Zh, "footer").contains("+/- 星等"));
-        assert!(i18n::tr(Language::Zh, "footer").contains("c 连线"));
-        assert!(i18n::tr(Language::En, "footer_compact").contains("+/- mag"));
-        assert!(i18n::tr(Language::En, "footer_compact").contains("c lines"));
-        assert!(i18n::tr(Language::En, "footer_compact").contains("g globe/sky"));
-        assert!(i18n::tr(Language::En, "ground_footer_compact").contains("arrows rotate"));
-        assert!(i18n::tr(Language::En, "ground_footer_compact").contains("/ city"));
-        assert!(!i18n::tr(Language::En, "ground_footer").contains("z zoom"));
+    fn footer_prioritizes_primary_actions() {
+        let zh_footer = i18n::tr(Language::Zh, "footer");
+        for expected in ["/ 搜索", "s 位置", "g 地球/星空", "o 设置", "? 帮助"] {
+            assert!(zh_footer.contains(expected), "{expected} missing");
+        }
+        for advanced in [
+            "space 暂停",
+            "x 指针",
+            "z 放大",
+            "+/- 星等",
+            "[/] 小时",
+            "Tab 星座",
+            "c 连线",
+            "h 今晚",
+        ] {
+            assert!(
+                !zh_footer.contains(advanced),
+                "{advanced} should live in help, not the footer"
+            );
+        }
+
+        let en_compact = i18n::tr(Language::En, "footer_compact");
+        for expected in [
+            "/ search",
+            "s location",
+            "g globe/sky",
+            "o settings",
+            "? help",
+        ] {
+            assert!(en_compact.contains(expected), "{expected} missing");
+        }
+        assert!(!en_compact.contains("x pointer"));
+        assert!(!en_compact.contains("+/- mag"));
+        assert!(!en_compact.contains("c lines"));
+
+        let ground_footer = i18n::tr(Language::En, "ground_footer");
+        assert!(ground_footer.contains("/ city"));
+        assert!(ground_footer.contains("g sky"));
+        assert!(ground_footer.contains("s save"));
+        assert!(!ground_footer.contains("arrows rotate"));
+        assert!(!ground_footer.contains("z zoom"));
         assert!(!i18n::tr(Language::Zh, "ground_footer").contains("c 连线"));
     }
 
     #[test]
-    fn footer_renders_mouse_hint_line() {
+    fn footer_renders_spatial_mouse_hint_line() {
         let backend = TestBackend::new(120, 36);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = app_for_test(false);
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal, 120, 36);
         assert!(
-            text.contains("mouse:"),
+            text.contains("mouse: left search · center flip · right settings"),
             "footer should expose mouse interaction hints\n{text}"
         );
     }
@@ -4657,7 +4681,9 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Char('g'))).unwrap();
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let text = buffer_text(&terminal, 120, 36);
-        assert!(text.contains("arrows rotate"));
+        assert!(text.contains("/ city"));
+        assert!(text.contains("g sky"));
+        assert!(!text.contains("arrows rotate"));
         assert!(text.contains("Globe legend"));
         assert!(text.contains("preview center"));
         assert!(!text.contains("constellation node"));
@@ -5127,7 +5153,7 @@ mod tests {
     }
 
     #[test]
-    fn help_columns_keep_common_shortcuts_visible() {
+    fn help_columns_group_common_and_advanced_shortcuts() {
         let (left, right) = help_columns(Language::Zh, palette(Theme::Midnight));
         let help_text = format!("{}{}", lines_text(&left), lines_text(&right));
         let compact_help = help_text
@@ -5135,9 +5161,20 @@ mod tests {
             .filter(|character| !character.is_whitespace())
             .collect::<String>();
         for expected in [
+            "常用",
+            "/搜索天体",
+            "g地球/星空",
+            "s位置/城市",
+            "o设置",
+            "时间",
+            "space暂停/实时",
+            "星空进阶",
+            "x指针",
+            "z放大星座",
+            "Tab下个星座",
+            "+/-星等",
+            "显示/设置",
             "c星座连线",
-            "g进入地球",
-            "+ / -极限星等",
             "t中英文",
             "T主题",
             "u字符集",
@@ -5151,7 +5188,6 @@ mod tests {
                 "{expected} missing from help"
             );
         }
-        assert!(compact_help.contains("z放大星座"));
     }
 
     #[test]
@@ -5159,6 +5195,9 @@ mod tests {
         let (left, right) =
             help_columns_for_view(Language::En, ViewMode::Ground, palette(Theme::Midnight));
         let help_text = format!("{}{}", lines_text(&left), lines_text(&right));
+        assert!(help_text.contains("Common"));
+        assert!(help_text.contains("Globe Tools"));
+        assert!(help_text.contains("Display"));
         assert!(help_text.contains("rotate longitude"));
         assert!(help_text.contains("save preview"));
         assert!(help_text.contains("opposite sky"));
