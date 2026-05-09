@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "termarium"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "chrono-tz",
