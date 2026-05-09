@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::{
     astro,
     catalog::{Catalog, Star},
-    config::{self, Config, Language, Location, SkyOrientation, Theme},
+    config::{self, Config, Language, Location, SkyCulture, SkyOrientation, Theme},
     constellations::{self, ConstellationLine},
     deep_sky::{self, DeepSkyObject},
     i18n, planets, star_aliases,
@@ -31,6 +31,7 @@ const GROUND_LON_STEP: f64 = 2.5;
 const GROUND_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
 const GROUND_FAST_STEP: f64 = 2.0;
 const SETTINGS_THEME_FIELD: usize = 1;
+const APP_MIN_LIMITING_MAGNITUDE: f64 = -1.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -548,6 +549,7 @@ pub enum Target {
     Star(u32),
     Constellation(String),
     Planet(&'static str),
+    Moon,
     DeepSky(&'static str),
     City(usize),
 }
@@ -710,6 +712,7 @@ pub struct App {
     pub config_path: PathBuf,
     pub catalog: Catalog,
     pub constellation_lines: Vec<ConstellationLine>,
+    pub chinese_constellation_lines: Vec<ConstellationLine>,
     pub deep_sky: Vec<DeepSkyObject>,
     pub screen: Screen,
     pub view_mode: ViewMode,
@@ -752,6 +755,12 @@ impl App {
         can_cancel_setup: bool,
         time_override: Option<DateTime<Utc>>,
     ) -> Self {
+        let mut config = config;
+        let magnitude_ceiling = catalog.faintest_magnitude();
+        config.display.limiting_magnitude = config
+            .display
+            .limiting_magnitude
+            .clamp(APP_MIN_LIMITING_MAGNITUDE, magnitude_ceiling);
         let setup = SetupState::from_location(&config.location);
         let ground = GroundState::from_location(&config.location);
         let time_base = time_override.unwrap_or_else(Utc::now);
@@ -776,6 +785,7 @@ impl App {
             config_path,
             catalog,
             constellation_lines: constellations::load(),
+            chinese_constellation_lines: constellations::load_chinese(),
             deep_sky: deep_sky::load(),
             screen,
             view_mode,
@@ -1016,6 +1026,7 @@ impl App {
                 self.config.display.charset = self.config.display.charset.next();
                 self.save()?;
             }
+            KeyCode::Char('y') => self.toggle_sky_culture()?,
             KeyCode::Char('x') => self.toggle_pointer(),
             KeyCode::Char('z') => self.toggle_constellation_zoom(),
             KeyCode::Char('g') => self.toggle_ground_sky(),
@@ -1077,6 +1088,7 @@ impl App {
                 self.config.display.charset = self.config.display.charset.next();
                 self.save()?;
             }
+            KeyCode::Char('y') => self.toggle_sky_culture()?,
             _ => {}
         }
         Ok(())
@@ -1153,17 +1165,41 @@ impl App {
             6 => self.config.display.moon_panel = !self.config.display.moon_panel,
             7 => self.config.display.labels = !self.config.display.labels,
             8 => self.config.display.constellations = !self.config.display.constellations,
-            9 => self.config.display.side_panel = !self.config.display.side_panel,
-            10 => self.config.display.landscape = self.config.display.landscape.next(),
-            11 => self.config.display.sky_orientation = self.config.display.sky_orientation.next(),
-            12 => {
+            9 => self.cycle_sky_culture(),
+            10 => self.config.display.side_panel = !self.config.display.side_panel,
+            11 => self.config.display.landscape = self.config.display.landscape.next(),
+            12 => self.config.display.sky_orientation = self.config.display.sky_orientation.next(),
+            13 => {
                 let delta = if forward { 0.1 } else { -0.1 };
-                self.config.display.limiting_magnitude =
-                    (self.config.display.limiting_magnitude + delta).clamp(-1.5, 6.0);
+                self.set_limiting_magnitude(self.config.display.limiting_magnitude + delta);
             }
             _ => {}
         }
         self.save()
+    }
+
+    fn toggle_sky_culture(&mut self) -> io::Result<()> {
+        self.cycle_sky_culture();
+        self.save()
+    }
+
+    fn cycle_sky_culture(&mut self) {
+        self.config.display.sky_culture = self.config.display.sky_culture.next();
+        if matches!(self.selected_target, Some(Target::Constellation(_))) {
+            self.selected_target = None;
+            self.constellation_zoom = false;
+            self.constellation_zoom_code = None;
+            self.sky_transition = None;
+        }
+        let culture_key = match self.config.display.sky_culture {
+            SkyCulture::Western => "western",
+            SkyCulture::Chinese => "chinese",
+        };
+        self.message = format!(
+            "{}: {}",
+            i18n::tr(self.config.language, "sky_culture"),
+            i18n::tr(self.config.language, culture_key)
+        );
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) -> io::Result<()> {
@@ -1634,6 +1670,23 @@ impl App {
         let needle = query.to_lowercase();
         let mut results = Vec::new();
 
+        for meta in constellations::metadata_for_culture(self.config.display.sky_culture) {
+            if constellations::matches_query(self.config.display.sky_culture, meta.code, query) {
+                results.push(SearchResult {
+                    label: match self.config.display.sky_culture {
+                        SkyCulture::Western => format!("{} / {}", meta.code, meta.en),
+                        SkyCulture::Chinese => format!("{} / {}", meta.zh, meta.en),
+                    },
+                    detail: format!(
+                        "{} · {}",
+                        i18n::tr(self.config.language, self.figure_kind_key()),
+                        meta.zh
+                    ),
+                    target: Target::Constellation(meta.code.to_string()),
+                });
+            }
+        }
+
         for star in &self.catalog.stars {
             if star_aliases::matches_query(*star, query) {
                 let label = star_aliases::display_name_for(*star, self.config.language);
@@ -1650,16 +1703,6 @@ impl App {
                         star.hip, star.magnitude
                     ),
                     target: Target::Star(star.hip),
-                });
-            }
-        }
-
-        for meta in constellations::CONSTELLATION_META {
-            if constellations::matches_query(meta.code, query) {
-                results.push(SearchResult {
-                    label: format!("{} / {}", meta.code, meta.en),
-                    detail: format!("constellation · {}", meta.zh),
-                    target: Target::Constellation(meta.code.to_string()),
                 });
             }
         }
@@ -1736,8 +1779,11 @@ impl App {
             self.constellation_zoom_code = Some(code.clone());
         }
 
-        let meta = constellations::meta_for(&code);
-        self.message = format!("{} · {}", meta.code, meta.en);
+        let meta = self.figure_meta(&code);
+        self.message = match self.config.display.sky_culture {
+            SkyCulture::Western => format!("{} · {}", meta.code, meta.en),
+            SkyCulture::Chinese => format!("{} · {}", meta.zh, meta.en),
+        };
     }
 
     pub fn selected_constellation_code(&self) -> Option<&str> {
@@ -1855,10 +1901,46 @@ impl App {
         self.setup_preset_matches().len()
     }
 
+    pub fn active_constellation_lines(&self) -> &[ConstellationLine] {
+        match self.config.display.sky_culture {
+            SkyCulture::Western => &self.constellation_lines,
+            SkyCulture::Chinese => &self.chinese_constellation_lines,
+        }
+    }
+
+    pub fn figure_meta(&self, code: &str) -> constellations::ConstellationMeta {
+        constellations::meta_for_culture(self.config.display.sky_culture, code)
+    }
+
+    pub fn figure_label(&self, code: &str) -> String {
+        constellations::figure_label(self.config.display.sky_culture, code, self.config.language)
+    }
+
+    pub fn figure_kind_key(&self) -> &'static str {
+        match self.config.display.sky_culture {
+            SkyCulture::Western => "constellation",
+            SkyCulture::Chinese => "asterism",
+        }
+    }
+
+    pub fn figure_node_legend_key(&self) -> &'static str {
+        match self.config.display.sky_culture {
+            SkyCulture::Western => "legend_constellation",
+            SkyCulture::Chinese => "legend_asterism",
+        }
+    }
+
+    pub fn figure_contains_hip(&self, code: &str, hip: u32) -> bool {
+        self.active_constellation_lines()
+            .iter()
+            .filter(|line| line.code.eq_ignore_ascii_case(code))
+            .any(|line| line.hips.contains(&hip))
+    }
+
     pub fn visible_constellation_codes(&self) -> Vec<String> {
         let mut codes = BTreeSet::new();
         let now = self.now();
-        for line in &self.constellation_lines {
+        for line in self.active_constellation_lines() {
             if line.hips.windows(2).any(|pair| {
                 self.line_endpoint_visible(pair[0], now) && self.line_endpoint_visible(pair[1], now)
             }) {
@@ -1875,7 +1957,7 @@ impl App {
     fn constellation_visible_at(&self, code: &str, location: &Location) -> bool {
         let now = self.now();
         let line_visible = self
-            .constellation_lines
+            .active_constellation_lines()
             .iter()
             .filter(|line| line.code.eq_ignore_ascii_case(code))
             .any(|line| {
@@ -1885,13 +1967,19 @@ impl App {
                 })
             });
         line_visible
-            || self.catalog.stars.iter().any(|star| {
-                star.constellation.eq_ignore_ascii_case(code)
-                    && star.magnitude <= self.config.display.limiting_magnitude
-                    && astro::horizontal_position(star.ra_hours, star.dec_degrees, location, now)
+            || (self.config.display.sky_culture == SkyCulture::Western
+                && self.catalog.stars.iter().any(|star| {
+                    star.constellation.eq_ignore_ascii_case(code)
+                        && star.magnitude <= self.config.display.limiting_magnitude
+                        && astro::horizontal_position(
+                            star.ra_hours,
+                            star.dec_degrees,
+                            location,
+                            now,
+                        )
                         .altitude
-                        > 0.0
-            })
+                            > 0.0
+                }))
     }
 
     pub fn set_pointer_canvas(&mut self, width: usize, height: usize) {
@@ -2202,7 +2290,7 @@ impl App {
                     self.constellation_not_visible_message(&code, self.active_location());
                 return;
             }
-            let meta = constellations::meta_for(&code);
+            let meta = self.figure_meta(&code);
             self.constellation_zoom = true;
             self.constellation_zoom_code = Some(code.clone());
             self.start_zoom_in_transition(code);
@@ -2212,7 +2300,10 @@ impl App {
             }
             self.message = format!(
                 "{} {}",
-                meta.en,
+                constellations::display_name_for_culture(
+                    self.config.display.sky_culture,
+                    &meta.code
+                ),
                 i18n::tr(self.config.language, "constellation_zoom_on")
             );
         }
@@ -2367,6 +2458,30 @@ impl App {
             }
         }
 
+        let moon = astro::moon_position(time);
+        let moon_horizontal =
+            astro::horizontal_position(moon.ra_hours, moon.dec_degrees, &location, time);
+        let moon_projected = if let Some(view) = zoom_view.as_ref() {
+            view.project_horizontal(moon_horizontal.altitude, moon_horizontal.azimuth)
+        } else {
+            astro::project_dome_for_orientation(
+                moon_horizontal.altitude,
+                moon_horizontal.azimuth,
+                width,
+                height,
+                self.config.display.sky_orientation,
+            )
+        };
+        if let Some((x, y)) = moon_projected {
+            targets.push(ProjectedTarget {
+                target: Target::Moon,
+                x,
+                y,
+                score: -12.0,
+                sort_key: "moon".to_string(),
+            });
+        }
+
         if self.config.display.deep_sky {
             for object in &self.deep_sky {
                 if object.magnitude.unwrap_or(99.0) > 9.5 {
@@ -2448,6 +2563,7 @@ impl App {
                 .map(|star| star_aliases::display_name_for(star, self.config.language))
                 .unwrap_or_else(|| format!("HIP {hip}")),
             Target::Planet(name) => (*name).to_string(),
+            Target::Moon => i18n::tr(self.config.language, "moon").to_string(),
             Target::DeepSky(name) => self
                 .deep_sky_by_name(name)
                 .map(|object| {
@@ -2458,7 +2574,9 @@ impl App {
                     }
                 })
                 .unwrap_or_else(|| (*name).to_string()),
-            Target::Constellation(code) => constellations::meta_for(code).en.to_string(),
+            Target::Constellation(code) => {
+                constellations::display_name_for_culture(self.config.display.sky_culture, code)
+            }
             Target::City(index) => PRESETS
                 .get(*index)
                 .map(|preset| preset.en.to_string())
@@ -2488,7 +2606,7 @@ impl App {
             &self.catalog.stars,
             &location,
             self.now(),
-            6.0,
+            self.catalog.faintest_magnitude(),
             source_width,
             source_height,
             orientation,
@@ -2568,7 +2686,7 @@ impl App {
                     &self.catalog.stars,
                     from,
                     self.now(),
-                    6.0,
+                    self.catalog.faintest_magnitude(),
                     source_width,
                     source_height,
                     self.config.display.sky_orientation,
@@ -2603,14 +2721,14 @@ impl App {
             .map(|star| (star.star.hip, (star.x, star.y)))
             .collect::<std::collections::HashMap<_, _>>();
         let mut coords = self
-            .constellation_lines
+            .active_constellation_lines()
             .iter()
             .filter(|line| line.code.eq_ignore_ascii_case(code))
             .flat_map(|line| line.hips.iter())
             .filter_map(|hip| points.get(hip).copied())
             .collect::<Vec<_>>();
 
-        if coords.len() < 2 {
+        if coords.len() < 2 && self.config.display.sky_culture == SkyCulture::Western {
             coords.extend(
                 visible
                     .iter()
@@ -2646,20 +2764,26 @@ impl App {
     }
 
     fn constellation_not_visible_message(&self, code: &str, location: &Location) -> String {
-        let meta = constellations::meta_for(code);
+        let meta = self.figure_meta(code);
         format!(
             "{}: {} ({}) · {}",
             i18n::tr(self.config.language, "constellation_not_visible_here"),
+            constellations::display_name_for_culture(self.config.display.sky_culture, meta.code),
             meta.en,
-            meta.code,
             location.name
         )
     }
 
     fn adjust_magnitude(&mut self, delta: f64) -> io::Result<()> {
-        self.config.display.limiting_magnitude =
-            (self.config.display.limiting_magnitude + delta).clamp(-1.5, 6.0);
+        self.set_limiting_magnitude(self.config.display.limiting_magnitude + delta);
         self.save()
+    }
+
+    fn set_limiting_magnitude(&mut self, value: f64) {
+        self.config.display.limiting_magnitude = value.clamp(
+            APP_MIN_LIMITING_MAGNITUDE,
+            self.catalog.faintest_magnitude(),
+        );
     }
 
     fn save(&self) -> io::Result<()> {
@@ -2982,13 +3106,13 @@ fn next_position(current: Option<usize>, len: usize, forward: bool) -> usize {
 }
 
 pub fn settings_count() -> usize {
-    13
+    14
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DisplayConfig, LandscapeMode, SkyOrientation, Theme};
+    use crate::config::{DisplayConfig, LandscapeMode, SkyCulture, SkyOrientation, Theme};
     use chrono::TimeZone;
 
     fn test_app(location: Location) -> App {
@@ -3010,6 +3134,7 @@ mod tests {
                     side_panel: true,
                     landscape: LandscapeMode::Horizon,
                     sky_orientation: SkyOrientation::Observer,
+                    sky_culture: SkyCulture::Western,
                 },
             },
             PathBuf::from("/tmp/termarium-test-city-config.json"),
@@ -3603,13 +3728,116 @@ mod tests {
             timezone: "Asia/Shanghai".to_string(),
         });
         app.screen = Screen::Settings;
-        app.settings.selected = 10;
+        app.settings.selected = 11;
 
         app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
         assert_eq!(app.config.display.landscape, LandscapeMode::Bearings);
 
         app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
         assert_eq!(app.config.display.landscape, LandscapeMode::Off);
+    }
+
+    #[test]
+    fn sky_culture_setting_cycles_modes() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.screen = Screen::Settings;
+        app.settings.selected = 9;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.sky_culture, SkyCulture::Chinese);
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(app.config.display.sky_culture, SkyCulture::Western);
+    }
+
+    #[test]
+    fn magnitude_adjustment_uses_catalog_faintest_star_as_ceiling() {
+        let catalog = Catalog {
+            stars: vec![
+                Star {
+                    hip: 1,
+                    proper: "",
+                    ra_hours: 0.0,
+                    dec_degrees: 0.0,
+                    magnitude: 4.0,
+                    color_index: None,
+                    constellation: "",
+                },
+                Star {
+                    hip: 2,
+                    proper: "",
+                    ra_hours: 1.0,
+                    dec_degrees: 1.0,
+                    magnitude: 8.7,
+                    color_index: None,
+                    constellation: "",
+                },
+            ],
+        };
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-magnitude-ceiling-config.json"),
+            catalog,
+            false,
+            true,
+            Some(Utc::now()),
+        );
+
+        app.adjust_magnitude(20.0).unwrap();
+
+        assert_eq!(app.config.display.limiting_magnitude, 8.7);
+    }
+
+    #[test]
+    fn sky_culture_shortcut_cycles_modes_without_footer_setting() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.selected_target = Some(Target::Constellation("Ori".to_string()));
+        app.constellation_zoom = true;
+        app.constellation_zoom_code = Some("Ori".to_string());
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('y'))).unwrap();
+        assert_eq!(app.config.display.sky_culture, SkyCulture::Chinese);
+        assert_eq!(app.selected_target, None);
+        assert!(!app.constellation_zoom);
+        assert_eq!(app.constellation_zoom_code, None);
+
+        app.view_mode = ViewMode::Ground;
+        app.handle_key(KeyEvent::from(KeyCode::Char('y'))).unwrap();
+        assert_eq!(app.config.display.sky_culture, SkyCulture::Western);
+    }
+
+    #[test]
+    fn chinese_sky_tab_and_zoom_use_asterisms() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-chinese-tab-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.config.display.sky_culture = SkyCulture::Chinese;
+
+        app.handle_key(KeyEvent::from(KeyCode::Tab)).unwrap();
+        let selected = app.selected_constellation_code().unwrap().to_string();
+        assert!(selected.starts_with("CN"));
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        assert!(app.constellation_zoom);
+        assert_eq!(
+            app.constellation_zoom_code.as_deref(),
+            Some(selected.as_str())
+        );
     }
 
     #[test]
@@ -3621,7 +3849,7 @@ mod tests {
             timezone: "Asia/Shanghai".to_string(),
         });
         app.screen = Screen::Settings;
-        app.settings.selected = 11;
+        app.settings.selected = 12;
 
         app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
         assert_eq!(app.config.display.sky_orientation, SkyOrientation::Map);
@@ -3817,6 +4045,50 @@ mod tests {
     }
 
     #[test]
+    fn chinese_sky_search_finds_asterism_names() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-chinese-sky-search-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.config.display.sky_culture = SkyCulture::Chinese;
+        for query in ["参宿", "Shen Xiu", "Three Stars"] {
+            app.search.query = query.to_string();
+            app.refresh_search();
+            assert!(
+                app.search
+                    .results
+                    .iter()
+                    .any(|result| result.target == Target::Constellation("CN003".to_string())),
+                "{query} should find 参宿"
+            );
+        }
+    }
+
+    #[test]
+    fn western_sky_search_does_not_return_chinese_asterisms() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-western-search-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        app.search.query = "参宿".to_string();
+        app.refresh_search();
+        assert!(
+            !app.search
+                .results
+                .iter()
+                .any(|result| result.target == Target::Constellation("CN003".to_string()))
+        );
+    }
+
+    #[test]
     fn search_finds_tau_ceti_aliases() {
         let mut app = App::new(
             Config::default(),
@@ -3848,6 +4120,29 @@ mod tests {
                 .any(|result| result.label == "天仓五 / Tau Ceti"),
             "Chinese UI should show Chinese and English star names"
         );
+    }
+
+    #[test]
+    fn search_finds_imported_chinese_star_names() {
+        let mut app = App::new(
+            Config::default(),
+            PathBuf::from("/tmp/termarium-test-imported-star-name-search-config.json"),
+            Catalog::load(),
+            false,
+            true,
+            Some(Utc::now()),
+        );
+        for query in ["王良增九", "Wang Liang Added IX"] {
+            app.search.query = query.to_string();
+            app.refresh_search();
+            assert!(
+                app.search
+                    .results
+                    .iter()
+                    .any(|result| result.target == Target::Star(43)),
+                "{query} should find HIP 43"
+            );
+        }
     }
 
     #[test]
@@ -3979,6 +4274,42 @@ mod tests {
         assert!(app.pointer.active);
         assert_eq!(app.pointer.hovered, Some(Target::Star(target.star.hip)));
         assert_eq!(app.selected_target, Some(Target::Star(target.star.hip)));
+    }
+
+    #[test]
+    fn pointer_can_select_visible_moon() {
+        let mut app = test_app(Location {
+            name: "Equator".to_string(),
+            latitude: 0.0,
+            longitude: 0.0,
+            timezone: "UTC".to_string(),
+        });
+        app.set_pointer_canvas(100, 28);
+        app.pointer.active = true;
+
+        let mut moon_cell = None;
+        for hour in 0..24 {
+            app.time_base = Utc.with_ymd_and_hms(2026, 5, 9, hour, 0, 0).unwrap();
+            app.clock_base = Instant::now();
+            app.paused = true;
+            moon_cell = app
+                .projected_pointer_targets(app.pointer.width, app.pointer.height)
+                .into_iter()
+                .find(|target| target.target == Target::Moon)
+                .map(|target| (target.x, target.y));
+            if moon_cell.is_some() {
+                break;
+            }
+        }
+
+        let (x, y) = moon_cell.expect("moon should be visible during at least one test hour");
+        app.pointer.x = x;
+        app.pointer.y = y;
+        app.update_pointer_hover();
+
+        assert_eq!(app.pointer.hovered, Some(Target::Moon));
+        assert_eq!(app.selected_target, Some(Target::Moon));
+        assert_eq!(app.message, "Moon");
     }
 
     #[test]

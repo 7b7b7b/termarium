@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use crate::{
     app::App,
     catalog::Catalog,
-    config::{Charset, Config, Language, Location, Theme},
+    config::{Charset, Config, Language, Location, SkyCulture, Theme},
 };
 
 #[derive(Debug, Parser)]
@@ -83,20 +83,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some(Command::CatalogInfo) => {
             let catalog = Catalog::load();
             let constellation_lines = constellations::load();
+            let chinese_lines = constellations::load_chinese();
             let deep_sky = deep_sky::load();
             let world_lines = world_map::load();
             let world_land = world_map::load_land();
+            let western_line_figures = constellation_lines
+                .iter()
+                .map(|line| line.code)
+                .collect::<BTreeSet<_>>()
+                .len();
+            let chinese_line_figures = chinese_lines
+                .iter()
+                .map(|line| line.code)
+                .collect::<BTreeSet<_>>()
+                .len();
+            let chinese_figures = constellations::metadata_for_culture(SkyCulture::Chinese).len();
             let named = catalog
                 .stars
                 .iter()
                 .filter(|star| !star.proper.is_empty())
                 .count();
+            let faintest_magnitude = catalog.faintest_magnitude();
             let hip_min = catalog.stars.iter().map(|star| star.hip).min().unwrap_or(0);
             let hip_max = catalog.stars.iter().map(|star| star.hip).max().unwrap_or(0);
             let constellations = catalog
                 .stars
                 .iter()
                 .map(|star| star.constellation)
+                .filter(|code| !code.is_empty())
                 .collect::<BTreeSet<_>>()
                 .len();
             println!("Termarium star catalog");
@@ -104,6 +118,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("star license: CC BY-SA 4.0");
             println!("line source: ConstellationLines");
             println!("line license: CC BY 4.0");
+            println!("Chinese sky source: Stellarium Chinese sky culture");
+            println!("Chinese sky line license: CC BY-SA");
+            println!("Chinese star-name source: Celestial Data");
+            println!("Chinese star-name license: BSD-3-Clause");
             println!("deep-sky source: OpenNGC v20260501");
             println!("deep-sky license: CC BY-SA 4.0");
             println!("world map source: Natural Earth 1:110m coastline and land");
@@ -114,10 +132,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("curated star aliases: {}", star_aliases::STAR_ALIASES.len());
             println!("hip range: {hip_min}..{hip_max}");
             println!("constellations: {constellations}");
-            println!("built-in line figures: {}", constellation_lines.len());
+            println!("western line figures: {western_line_figures}");
+            println!("western line paths: {}", constellation_lines.len());
             println!(
-                "built-in line segments: {}",
+                "western line segments: {}",
                 constellation_lines
+                    .iter()
+                    .map(constellations::ConstellationLine::segment_count)
+                    .sum::<usize>()
+            );
+            println!("Chinese sky figures: {chinese_figures}");
+            println!("Chinese line figures: {chinese_line_figures}");
+            println!("Chinese line paths: {}", chinese_lines.len());
+            println!(
+                "Chinese line segments: {}",
+                chinese_lines
                     .iter()
                     .map(constellations::ConstellationLine::segment_count)
                     .sum::<usize>()
@@ -139,7 +168,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     .map(|line| line.points.len())
                     .sum::<usize>()
             );
-            println!("limiting magnitude: <= 6.0");
+            println!("limiting magnitude ceiling: <= {faintest_magnitude:.1}");
             return Ok(());
         }
         _ => {}

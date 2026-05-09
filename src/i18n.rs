@@ -27,6 +27,9 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "side_panel") => "Side panel",
         (Language::En, "landscape") => "Landscape",
         (Language::En, "sky_orientation") => "Sky orientation",
+        (Language::En, "sky_culture") => "Sky culture",
+        (Language::En, "western") => "western",
+        (Language::En, "chinese") => "chinese",
         (Language::En, "on") => "on",
         (Language::En, "off") => "off",
         (Language::En, "live") => "live",
@@ -56,6 +59,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "planet") => "Planet",
         (Language::En, "deep_sky") => "Deep sky",
         (Language::En, "constellation") => "Constellation",
+        (Language::En, "asterism") => "Asterism",
         (Language::En, "constellation_zoom") => "Zoom",
         (Language::En, "constellation_zoom_hint") => "z zoom · Tab next while zoomed",
         (Language::En, "constellation_zoom_exit_hint") => "z/Esc exit zoom · Tab next",
@@ -70,6 +74,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "legend_bright_star") => "bright star",
         (Language::En, "legend_dim_star") => "dim star",
         (Language::En, "legend_constellation") => "constellation node",
+        (Language::En, "legend_asterism") => "asterism node",
         (Language::En, "legend_deep_sky") => "deep-sky object",
         (Language::En, "legend_planets") => "planets",
         (Language::En, "legend_globe_day") => "sunlit texture",
@@ -83,6 +88,9 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "city_search") => "City Search",
         (Language::En, "search_empty") => {
             "Type a star, alias, HIP/HD, constellation, planet, or Messier object"
+        }
+        (Language::En, "search_empty_chinese_sky") => {
+            "Type a star, Chinese name, HIP/HD, asterism, planet, or Messier object"
         }
         (Language::En, "city_search_empty") => "Type a city name, timezone, or Chinese name",
         (Language::En, "type_to_search") => "type to search",
@@ -150,6 +158,9 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "side_panel") => "侧栏",
         (Language::Zh, "landscape") => "地景",
         (Language::Zh, "sky_orientation") => "星图方向",
+        (Language::Zh, "sky_culture") => "星空体系",
+        (Language::Zh, "western") => "西方",
+        (Language::Zh, "chinese") => "中国",
         (Language::Zh, "on") => "开",
         (Language::Zh, "off") => "关",
         (Language::Zh, "live") => "实时",
@@ -179,6 +190,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "planet") => "行星",
         (Language::Zh, "deep_sky") => "深空",
         (Language::Zh, "constellation") => "星座",
+        (Language::Zh, "asterism") => "星官",
         (Language::Zh, "constellation_zoom") => "放大",
         (Language::Zh, "constellation_zoom_hint") => "z 放大 · 放大时 Tab 切换",
         (Language::Zh, "constellation_zoom_exit_hint") => "z/Esc 退出放大 · Tab 切换",
@@ -193,6 +205,7 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "legend_bright_star") => "亮星",
         (Language::Zh, "legend_dim_star") => "暗星",
         (Language::Zh, "legend_constellation") => "星座节点",
+        (Language::Zh, "legend_asterism") => "星官节点",
         (Language::Zh, "legend_deep_sky") => "深空天体",
         (Language::Zh, "legend_planets") => "行星",
         (Language::Zh, "legend_globe_day") => "白天纹理",
@@ -205,6 +218,9 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "search") => "搜索",
         (Language::Zh, "city_search") => "搜索城市",
         (Language::Zh, "search_empty") => "输入星名、别名、HIP/HD、星座、行星或梅西耶天体",
+        (Language::Zh, "search_empty_chinese_sky") => {
+            "输入星名、传统星名、HIP/HD、星官、行星或梅西耶天体"
+        }
         (Language::Zh, "city_search_empty") => "输入城市名、时区或中文名",
         (Language::Zh, "type_to_search") => "输入以搜索",
         (Language::Zh, "city_no_match") => "无匹配城市",

@@ -1,4 +1,4 @@
-use crate::{catalog::Star, config::Language};
+use crate::{catalog::Star, config::Language, constellations};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StarAlias {
@@ -310,12 +310,31 @@ pub fn display_name_for(star: Star, language: Language) -> String {
                 return format!("{chinese} / {english}");
             }
         }
+        if let Some(chinese) = constellations::chinese_star_name_for_hip(star.hip) {
+            let fallback = if english == format!("HIP {}", star.hip) {
+                format!("HIP {}", star.hip)
+            } else {
+                english.clone()
+            };
+            if chinese.zh != fallback {
+                return format!("{} / {}", chinese.zh, fallback);
+            }
+        }
     }
     english
 }
 
 pub fn summary_aliases_for(star: Star, language: Language) -> Option<String> {
-    let entry = for_hip(star.hip)?;
+    let Some(entry) = for_hip(star.hip) else {
+        let names = constellations::star_names_for_hip(star.hip)
+            .into_iter()
+            .flat_map(|name| [name.zh, name.pinyin, name.en, name.desig])
+            .filter(|alias| !alias.is_empty())
+            .filter(|alias| language == Language::Zh || !contains_cjk(alias))
+            .take(4)
+            .collect::<Vec<_>>();
+        return (!names.is_empty()).then(|| names.join(", "));
+    };
     let chinese = chinese_name(star);
     let aliases = entry
         .aliases
@@ -368,7 +387,7 @@ pub fn matches_query(star: Star, query: &str) -> bool {
         entry.aliases.iter().any(|alias| {
             normalize(alias).contains(&normalized_query) || compact(alias).contains(&compact_query)
         })
-    })
+    }) || constellations::chinese_star_name_matches(star.hip, query)
 }
 
 fn hip_query(query: &str) -> Option<u32> {
@@ -443,5 +462,19 @@ mod tests {
                 entry.hip
             );
         }
+    }
+
+    #[test]
+    fn finds_imported_chinese_star_names() {
+        let catalog = Catalog::load();
+        let star = catalog
+            .stars
+            .iter()
+            .copied()
+            .find(|star| star.hip == 43)
+            .unwrap();
+        assert!(matches_query(star, "王良增九"));
+        assert!(matches_query(star, "Wang Liang Added IX"));
+        assert_eq!(display_name_for(star, Language::Zh), "王良增九 / HIP 43");
     }
 }

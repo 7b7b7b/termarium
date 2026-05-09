@@ -26,6 +26,7 @@ Linux x64, and Windows x64.
 - Full-screen terminal UI built with Rust, Ratatui, and Crossterm
 - Real HYG v4.2 bright-star subset, bundled for offline use
 - 88 western constellation figures from a bundled CC BY 4.0 line catalog
+- Optional Chinese sky culture with 318 星官 / 二十八宿 figures and traditional Chinese star-name search
 - Offline Messier deep-sky catalog derived from OpenNGC v20260501
 - Time travel, city tour, alias-aware target search, constellation highlight, and tonight panel
 - Crosshair pointer mode for selecting visible stars directly from the sky map
@@ -98,10 +99,12 @@ c       toggle constellation lines
 + / -   adjust limiting magnitude
 ```
 
-Landscape mode and sky orientation are available from the settings panel.
+Landscape mode, sky orientation, and western / Chinese sky culture are
+available from the settings panel.
 
 Search accepts proper names, curated aliases, HIP/HD-style identifiers, western
-constellation names, Chinese constellation names, planets, and Messier objects.
+constellation names, Chinese sky-culture asterisms, traditional Chinese star
+names, planets, and Messier objects.
 For example, `Tau Ceti`, `τ Ceti`, `天仓五`, `HD 10700`, and `HIP 8102` all
 select the same star.
 
@@ -114,13 +117,15 @@ matched city fills the location fields, then the usual save row applies it.
 The application code is MIT licensed. The bundled star catalog is a filtered
 subset derived from the HYG Database v4.2 and remains under CC BY-SA 4.0. The
 constellation-line catalog is derived from Marc van der Sluys'
-ConstellationLines data and remains under CC BY 4.0. The deep-sky catalog is
-derived from OpenNGC v20260501 and remains under CC BY-SA 4.0. See `NOTICE` for
-attribution. The bundled world coastline and land data is derived from Natural
-Earth 1:110m public domain vector data, and the bundled globe color texture is
-downsampled from NASA Blue Marble Next Generation July 2004 topography and
-bathymetry imagery. Planet and solar calculations are local approximate
-algorithms based on NASA/JPL and NOAA public reference formulas.
+ConstellationLines data and remains under CC BY 4.0. The Chinese sky-culture
+figures are converted from Stellarium Chinese sky culture data under CC BY-SA,
+with compact search metadata from Celestial Data under BSD-3-Clause. The
+deep-sky catalog is derived from OpenNGC v20260501 and remains under CC BY-SA
+4.0. See `NOTICE` for attribution. The bundled world coastline and land data is
+derived from Natural Earth 1:110m public domain vector data, and the bundled
+globe color texture is downsampled from NASA Blue Marble Next Generation July
+2004 topography and bathymetry imagery. Planet and solar calculations are local
+approximate algorithms based on NASA/JPL and NOAA public reference formulas.
 
 ## Development
 

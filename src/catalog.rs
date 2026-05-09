@@ -15,6 +15,7 @@ pub struct Catalog {
 }
 
 const HYG_BRIGHT_STARS: &str = include_str!("../data/hyg_v42_bright.csv");
+const DEFAULT_LIMITING_MAGNITUDE_CEILING: f64 = 6.0;
 
 impl Catalog {
     pub fn load() -> Self {
@@ -24,6 +25,14 @@ impl Catalog {
             .filter_map(parse_star)
             .collect::<Vec<_>>();
         Self { stars }
+    }
+
+    pub fn faintest_magnitude(&self) -> f64 {
+        self.stars
+            .iter()
+            .map(|star| star.magnitude)
+            .filter(|magnitude| magnitude.is_finite())
+            .fold(DEFAULT_LIMITING_MAGNITUDE_CEILING, f64::max)
     }
 }
 
@@ -56,7 +65,9 @@ mod tests {
     fn parses_bundled_catalog() {
         let catalog = Catalog::load();
         assert!(catalog.stars.len() > 4_000);
-        assert!(catalog.stars.iter().all(|star| star.magnitude <= 6.0));
+        assert!(catalog.stars.len() > 5_500);
+        assert!(catalog.stars.iter().any(|star| star.magnitude > 6.0));
+        assert!(catalog.faintest_magnitude() > 6.0);
     }
 
     #[test]

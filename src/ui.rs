@@ -28,7 +28,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::{
     app::{self, App, PRESETS, Screen, Target, ViewMode},
     astro,
-    config::{LandscapeMode, Language, Location, SkyOrientation, Theme},
+    config::{LandscapeMode, Language, Location, SkyCulture, SkyOrientation, Theme},
     constellations, i18n, planets, solar, star_aliases,
 };
 
@@ -732,11 +732,9 @@ fn draw_star_canvas(frame: &mut Frame, app: &mut App, area: Rect, palette: Palet
     }
 
     let sky_location = app.render_location();
-    let visible = astro::visible_stars_for_orientation(
-        &app.catalog.stars,
+    let visible = visible_stars_for_canvas(
+        app,
         &sky_location,
-        app.now(),
-        app.config.display.limiting_magnitude,
         inner.width as usize,
         inner.height as usize,
         app.config.display.sky_orientation,
@@ -994,11 +992,9 @@ fn sky_canvas_grid_for_location(
     height: usize,
     palette: Palette,
 ) -> Vec<Vec<SkyCell>> {
-    let visible = astro::visible_stars_for_orientation(
-        &app.catalog.stars,
+    let visible = visible_stars_for_canvas(
+        app,
         sky_location,
-        app.now(),
-        app.config.display.limiting_magnitude,
         width,
         height,
         app.config.display.sky_orientation,
@@ -1049,6 +1045,20 @@ fn horizon_sky_grid(
     };
     let mut grid = vec![vec![empty; width]; height];
     let unicode = app.config.display.charset.canvas_unicode();
+
+    if !matches!(app.config.display.landscape, LandscapeMode::Off) {
+        draw_local_ground_ring(
+            &mut grid,
+            app,
+            &location,
+            width,
+            height,
+            SkyOrientation::Observer,
+            horizon_sky_scale(shape_progress),
+            1.0,
+            palette,
+        );
+    }
 
     for star in visible.iter().rev() {
         set_cell(
@@ -1176,7 +1186,7 @@ fn horizon_sky_project(
     let center_y = height.saturating_sub(1) as f64 / 2.0;
     let x_radius = center_x.max(1.0);
     let y_radius = center_y.max(1.0);
-    let scale = lerp_f64(1.58, 1.0, shape_progress);
+    let scale = horizon_sky_scale(shape_progress);
     let azimuth = azimuth.to_radians();
     let x = center_x - azimuth.sin() * radius * x_radius * scale;
     let y = center_y - azimuth.cos() * radius * y_radius * scale;
@@ -1192,6 +1202,10 @@ fn horizon_sky_project(
     }
 
     Some((x.round() as usize, y.round() as usize))
+}
+
+fn horizon_sky_scale(shape_progress: f64) -> f64 {
+    lerp_f64(1.58, 1.0, shape_progress)
 }
 
 fn horizon_observer_location(app: &App, progress: f64) -> Location {
@@ -1951,7 +1965,6 @@ fn zoomed_sky_lines(
 ) -> Option<Vec<Line<'static>>> {
     let code = app.zoom_render_code()?;
     let view = app.zoom_render_view(width, height)?;
-    let visible = &view.stars;
     let empty = SkyCell {
         ch: ' ',
         style: Style::default().fg(palette.muted).bg(palette.bg),
@@ -1960,6 +1973,18 @@ fn zoomed_sky_lines(
     let unicode = app.config.display.charset.canvas_unicode();
     let location = app.render_location();
     let time = app.now();
+    let moon = moon_render_context(&location, time);
+    let mut visible = view.stars.clone();
+    visible.retain(|star| {
+        star_survives_moonlight(
+            star.star,
+            &location,
+            time,
+            app.config.display.limiting_magnitude,
+            moon,
+        )
+    });
+    let visible = &visible;
     let horizon_style = Style::default().fg(palette.dim_line).bg(palette.bg);
 
     for azimuth in (0..360).step_by(2) {
@@ -1979,7 +2004,9 @@ fn zoomed_sky_lines(
     }
 
     for star in visible.iter().rev() {
-        let in_constellation = star.star.constellation.eq_ignore_ascii_case(code);
+        let in_constellation = app.figure_contains_hip(code, star.star.hip)
+            || (app.config.display.sky_culture == SkyCulture::Western
+                && star.star.constellation.eq_ignore_ascii_case(code));
         let selected =
             matches!(app.selected_target, Some(Target::Star(hip)) if hip == star.star.hip);
         let symbol = if selected {
@@ -2071,6 +2098,17 @@ fn zoomed_sky_lines(
         unicode,
     );
 
+    draw_moon(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, &location, time);
+            view.project_horizontal(horizontal.altitude, horizontal.azimuth)
+        },
+        palette,
+        unicode,
+    );
+
     if !app.pointer.active {
         draw_selected_label(
             &mut grid,
@@ -2084,12 +2122,16 @@ fn zoomed_sky_lines(
         );
     }
 
-    let meta = constellations::meta_for(code);
+    let meta = app.figure_meta(code);
+    let title = match app.config.display.sky_culture {
+        SkyCulture::Western => format!("{} · {}", meta.code, meta.en),
+        SkyCulture::Chinese => format!("{} · {}", meta.zh, meta.en),
+    };
     draw_text(
         &mut grid,
         1,
         0,
-        &format!("{} · {}", meta.code, meta.en),
+        &title,
         Style::default()
             .fg(palette.selected)
             .bg(palette.bg)
@@ -2117,6 +2159,7 @@ fn sky_lines(
     let unicode = app.config.display.charset.canvas_unicode();
     let orientation = app.config.display.sky_orientation;
     let horizon_style = Style::default().fg(palette.dim_line).bg(palette.bg);
+    let time = app.now();
 
     for azimuth in (0..360).step_by(2) {
         if let Some((x, y)) =
@@ -2139,6 +2182,8 @@ fn sky_lines(
 
     draw_landscape(
         &mut grid,
+        app,
+        location,
         width,
         height,
         app.config.display.landscape,
@@ -2169,7 +2214,6 @@ fn sky_lines(
         draw_constellation_lines(&mut grid, visible, app, width, height, palette, unicode);
     }
 
-    let time = app.now();
     draw_deep_sky(
         &mut grid,
         app,
@@ -2246,6 +2290,23 @@ fn sky_lines(
         unicode,
     );
 
+    draw_moon(
+        &mut grid,
+        app,
+        |ra, dec| {
+            let horizontal = astro::horizontal_position(ra, dec, location, time);
+            astro::project_dome_for_orientation(
+                horizontal.altitude,
+                horizontal.azimuth,
+                width,
+                height,
+                orientation,
+            )
+        },
+        palette,
+        unicode,
+    );
+
     if !app.pointer.active {
         draw_selected_label(
             &mut grid,
@@ -2293,6 +2354,8 @@ fn selected_symbol(unicode: bool) -> char {
 
 fn draw_landscape(
     grid: &mut [Vec<SkyCell>],
+    app: &App,
+    location: &Location,
     width: usize,
     height: usize,
     mode: LandscapeMode,
@@ -2303,25 +2366,17 @@ fn draw_landscape(
         return;
     }
 
-    let ground_rows = (height / 5).clamp(1, 3);
-    let ground_start = height.saturating_sub(ground_rows);
-    let ground_style = Style::default().fg(palette.veil).bg(palette.panel);
-    let horizon_style = Style::default().fg(palette.dim_line).bg(palette.panel);
-
-    for y in ground_start..height {
-        for x in 0..width {
-            let ch = if y == ground_start { '_' } else { ' ' };
-            set_cell(grid, x, y, ch, ground_style);
-        }
-    }
-
-    for azimuth in (0..360).step_by(4) {
-        if let Some((x, y)) =
-            astro::project_dome_for_orientation(0.0, azimuth as f64, width, height, orientation)
-        {
-            set_cell(grid, x, y, '_', horizon_style);
-        }
-    }
+    draw_local_ground_ring(
+        grid,
+        app,
+        location,
+        width,
+        height,
+        orientation,
+        1.0,
+        1.0,
+        palette,
+    );
 
     if !matches!(mode, LandscapeMode::Bearings) {
         return;
@@ -2329,7 +2384,7 @@ fn draw_landscape(
 
     let tick_style = Style::default()
         .fg(palette.cyan)
-        .bg(palette.panel)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
     for azimuth in (0..360).step_by(45) {
         if let Some((x, y)) =
@@ -2340,6 +2395,108 @@ fn draw_landscape(
                 set_cell(grid, x, (y + dy).min(height - 1), '|', tick_style);
             }
         }
+    }
+}
+
+fn draw_local_ground_ring(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    location: &Location,
+    width: usize,
+    height: usize,
+    orientation: SkyOrientation,
+    dome_scale: f64,
+    opacity: f64,
+    palette: Palette,
+) {
+    if width < 4 || height < 4 {
+        return;
+    }
+
+    let center_x = width.saturating_sub(1) as f64 / 2.0;
+    let center_y = height.saturating_sub(1) as f64 / 2.0;
+    let radius_x = center_x.max(1.0) * dome_scale.max(0.01);
+    let radius_y = center_y.max(1.0) * dome_scale.max(0.01);
+    let opacity = opacity.clamp(0.0, 1.0);
+    let outer_radius = [
+        (0.0, 0.0),
+        (width.saturating_sub(1) as f64, 0.0),
+        (0.0, height.saturating_sub(1) as f64),
+        (
+            width.saturating_sub(1) as f64,
+            height.saturating_sub(1) as f64,
+        ),
+    ]
+    .into_iter()
+    .map(|(x, y)| {
+        let dx = (x - center_x) / radius_x;
+        let dy = (center_y - y) / radius_y;
+        (dx * dx + dy * dy).sqrt()
+    })
+    .fold(1.0, f64::max);
+    let ring_depth = (outer_radius - 1.0).max(0.001);
+
+    let sun = solar::sun_position(app.now());
+    let gmst_hours = astro::local_sidereal_time_hours(app.now(), 0.0);
+    let subsolar_lon = normalize_degrees((sun.ra_hours - gmst_hours) * 15.0);
+    let sun_lat = sun.dec_degrees.to_radians();
+    let bg = color_to_rgb(palette.bg);
+    let east_sign = match orientation {
+        SkyOrientation::Observer => -1.0,
+        SkyOrientation::Map => 1.0,
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = (x as f64 - center_x) / radius_x;
+            let dy = (center_y - y as f64) / radius_y;
+            let radius = (dx * dx + dy * dy).sqrt();
+            if radius <= 1.0 {
+                continue;
+            }
+
+            let azimuth = normalize_degrees((dx / east_sign).atan2(dy).to_degrees());
+            let ring_t = ((radius - 1.0) / ring_depth).clamp(0.0, 1.0);
+            let distance_km = lerp_f64(25.0, 2_400.0, smootherstep01(ring_t));
+            let (lon, lat) =
+                destination_point(location.latitude, location.longitude, azimuth, distance_km);
+            let altitude = solar_altitude(lat.to_radians(), lon, sun_lat, subsolar_lon);
+            let earth = globe_surface_color(lon, lat, altitude);
+            let edge_fade = smootherstep01((radius - 1.0) / 0.055);
+            let strength = opacity * edge_fade * lerp_f64(0.16, 0.52, smootherstep01(ring_t));
+            let color = RgbColor::mix(bg, earth, strength).to_color();
+            set_cell(grid, x, y, ' ', Style::default().fg(color).bg(color));
+        }
+    }
+}
+
+fn destination_point(lat: f64, lon: f64, bearing: f64, distance_km: f64) -> (f64, f64) {
+    const EARTH_RADIUS_KM: f64 = 6_371.0;
+    let angular_distance = distance_km / EARTH_RADIUS_KM;
+    let lat1 = lat.to_radians();
+    let lon1 = lon.to_radians();
+    let bearing = bearing.to_radians();
+    let (sin_lat1, cos_lat1) = lat1.sin_cos();
+    let (sin_distance, cos_distance) = angular_distance.sin_cos();
+    let (sin_bearing, cos_bearing) = bearing.sin_cos();
+
+    let lat2 = (sin_lat1 * cos_distance + cos_lat1 * sin_distance * cos_bearing)
+        .clamp(-1.0, 1.0)
+        .asin();
+    let lon2 =
+        lon1 + (sin_bearing * sin_distance * cos_lat1).atan2(cos_distance - sin_lat1 * lat2.sin());
+
+    (normalize_degrees(lon2.to_degrees()), lat2.to_degrees())
+}
+
+fn color_to_rgb(color: Color) -> RgbColor {
+    match color {
+        Color::Rgb(r, g, b) => RgbColor::new(r as f64, g as f64, b as f64),
+        Color::Black => RgbColor::new(0.0, 0.0, 0.0),
+        Color::DarkGray => RgbColor::new(64.0, 64.0, 64.0),
+        Color::Gray => RgbColor::new(128.0, 128.0, 128.0),
+        Color::White => RgbColor::new(255.0, 255.0, 255.0),
+        _ => RgbColor::new(4.0, 8.0, 18.0),
     }
 }
 
@@ -2496,7 +2653,7 @@ fn draw_constellation_lines(
         .collect::<HashMap<_, _>>();
     let selected = app.selected_constellation_code();
 
-    for constellation in &app.constellation_lines {
+    for constellation in app.active_constellation_lines() {
         let highlighted =
             selected.is_some_and(|code| code.eq_ignore_ascii_case(constellation.code));
         let dimmed = selected.is_some() && !highlighted;
@@ -2549,7 +2706,7 @@ fn draw_backdrop_constellation_lines(
         .collect::<HashMap<_, _>>();
     let selected = app.selected_constellation_code();
 
-    for constellation in &app.constellation_lines {
+    for constellation in app.active_constellation_lines() {
         let highlighted =
             selected.is_some_and(|code| code.eq_ignore_ascii_case(constellation.code));
         let dimmed = selected.is_some() && !highlighted;
@@ -2615,13 +2772,14 @@ fn draw_constellation_labels(
             })
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD);
-        draw_text(grid, hit.x, hit.y, &hit.code, label_style, unicode);
+        draw_text(grid, hit.x, hit.y, &hit.label, label_style, unicode);
     }
 }
 
 #[derive(Debug, Clone)]
 struct ConstellationLabelHit {
     code: String,
+    label: String,
     x: usize,
     y: usize,
     width: usize,
@@ -2643,21 +2801,37 @@ fn constellation_label_hits(
         .map(|star| (star.star.hip, (star.x, star.y)))
         .collect::<HashMap<_, _>>();
 
-    app.constellation_lines
-        .iter()
-        .filter_map(|constellation| {
-            let mut endpoints = Vec::new();
-            for pair in constellation.hips.windows(2) {
-                let Some(&(x0, y0)) = points.get(&pair[0]) else {
-                    continue;
-                };
-                let Some(&(x1, y1)) = points.get(&pair[1]) else {
-                    continue;
-                };
-                endpoints.push((x0, y0));
-                endpoints.push((x1, y1));
-            }
+    let mut groups: Vec<(String, Vec<(usize, usize)>)> = Vec::new();
+    let mut group_index = HashMap::new();
+    for constellation in app.active_constellation_lines() {
+        let mut endpoints = Vec::new();
+        for pair in constellation.hips.windows(2) {
+            let Some(&(x0, y0)) = points.get(&pair[0]) else {
+                continue;
+            };
+            let Some(&(x1, y1)) = points.get(&pair[1]) else {
+                continue;
+            };
+            endpoints.push((x0, y0));
+            endpoints.push((x1, y1));
+        }
 
+        if endpoints.is_empty() {
+            continue;
+        }
+
+        let index = *group_index
+            .entry(constellation.code.to_string())
+            .or_insert_with(|| {
+                groups.push((constellation.code.to_string(), Vec::new()));
+                groups.len() - 1
+            });
+        groups[index].1.extend(endpoints);
+    }
+
+    groups
+        .into_iter()
+        .filter_map(|(code, mut endpoints)| {
             endpoints.sort_unstable();
             endpoints.dedup();
             if endpoints.is_empty() {
@@ -2672,9 +2846,11 @@ fn constellation_label_hits(
             if label_x >= width {
                 return None;
             }
-            let label_width = canvas_label_width(constellation.code, unicode).min(width - label_x);
-            (label_width > 0).then(|| ConstellationLabelHit {
-                code: constellation.code.to_string(),
+            let label = app.figure_label(&code);
+            let label_width = canvas_label_width(&label, unicode).min(width - label_x);
+            (label_width > 0).then_some(ConstellationLabelHit {
+                code,
+                label,
                 x: label_x,
                 y,
                 width: label_width,
@@ -2714,14 +2890,91 @@ fn sky_visible_for_hit(app: &App, width: usize, height: usize) -> Vec<astro::Vis
     }
 
     let sky_location = app.render_location();
-    astro::visible_stars(
-        &app.catalog.stars,
+    visible_stars_for_canvas(
+        app,
         &sky_location,
-        app.now(),
-        app.config.display.limiting_magnitude,
         width,
         height,
+        app.config.display.sky_orientation,
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MoonRenderContext {
+    position: astro::MoonPosition,
+    horizontal: astro::HorizontalPosition,
+    phase: astro::MoonPhase,
+    angular_radius: f64,
+}
+
+fn moon_render_context(
+    location: &Location,
+    time: chrono::DateTime<chrono::Utc>,
+) -> MoonRenderContext {
+    let position = astro::moon_position(time);
+    let horizontal =
+        astro::horizontal_position(position.ra_hours, position.dec_degrees, location, time);
+    MoonRenderContext {
+        position,
+        horizontal,
+        phase: astro::moon_phase(time),
+        angular_radius: astro::moon_angular_radius_degrees(position.distance_earth_radii),
+    }
+}
+
+fn visible_stars_for_canvas(
+    app: &App,
+    location: &Location,
+    width: usize,
+    height: usize,
+    orientation: SkyOrientation,
+) -> Vec<astro::VisibleStar> {
+    let time = app.now();
+    let limiting_magnitude = app.config.display.limiting_magnitude;
+    let moon = moon_render_context(location, time);
+    astro::visible_stars_for_orientation(
+        &app.catalog.stars,
+        location,
+        time,
+        limiting_magnitude,
+        width,
+        height,
+        orientation,
+    )
+    .into_iter()
+    .filter(|visible| {
+        star_survives_moonlight(visible.star, location, time, limiting_magnitude, moon)
+    })
+    .collect()
+}
+
+fn star_survives_moonlight(
+    star: crate::catalog::Star,
+    location: &Location,
+    time: chrono::DateTime<chrono::Utc>,
+    limiting_magnitude: f64,
+    moon: MoonRenderContext,
+) -> bool {
+    if moon.horizontal.altitude <= 0.0 {
+        return true;
+    }
+    let separation = astro::angular_separation_degrees(
+        star.ra_hours,
+        star.dec_degrees,
+        moon.position.ra_hours,
+        moon.position.dec_degrees,
+    );
+    if separation <= moon.angular_radius {
+        return false;
+    }
+    let horizontal = astro::horizontal_position(star.ra_hours, star.dec_degrees, location, time);
+    let loss = astro::moonlight_limiting_magnitude_loss(
+        moon.horizontal.altitude,
+        horizontal.altitude,
+        separation,
+        moon.phase,
+    );
+    star.magnitude <= limiting_magnitude - loss
 }
 
 fn draw_deep_sky<F>(
@@ -2811,6 +3064,62 @@ fn draw_planets<F>(
     }
 }
 
+fn draw_moon<F>(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    mut project: F,
+    palette: Palette,
+    unicode: bool,
+) where
+    F: FnMut(f64, f64) -> Option<(usize, usize)>,
+{
+    let location = app.render_location();
+    let time = app.now();
+    let moon = moon_render_context(&location, time);
+    let Some((x, y)) = project(moon.position.ra_hours, moon.position.dec_degrees) else {
+        return;
+    };
+    let selected = matches!(app.selected_target, Some(Target::Moon));
+    let phase = moon.phase;
+    let symbol = if selected {
+        selected_symbol(unicode)
+    } else if unicode {
+        i18n::moon_symbol(phase).chars().next().unwrap_or('●')
+    } else {
+        'M'
+    };
+    let style = Style::default()
+        .fg(if selected {
+            palette.selected
+        } else {
+            palette.moon
+        })
+        .bg(palette.bg)
+        .add_modifier(Modifier::BOLD);
+    set_cell(grid, x, y, symbol, style);
+    if app.config.display.labels {
+        draw_text(
+            grid,
+            x.saturating_add(2),
+            y,
+            i18n::tr(app.config.language, "moon"),
+            Style::default()
+                .fg(if selected {
+                    palette.selected
+                } else {
+                    palette.moon
+                })
+                .bg(palette.bg)
+                .add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            unicode,
+        );
+    }
+}
+
 fn draw_planet_labels<F>(
     grid: &mut [Vec<SkyCell>],
     app: &App,
@@ -2878,6 +3187,14 @@ fn selected_coordinates(app: &App) -> Option<(String, f64, f64)> {
         Target::Planet(name) => app
             .planet_by_name(name)
             .map(|planet| (planet.name.to_string(), planet.ra_hours, planet.dec_degrees)),
+        Target::Moon => {
+            let moon = astro::moon_position(app.now());
+            Some((
+                i18n::tr(app.config.language, "moon").to_string(),
+                moon.ra_hours,
+                moon.dec_degrees,
+            ))
+        }
         Target::DeepSky(name) => app
             .deep_sky_by_name(name)
             .map(|object| (object.name.to_string(), object.ra_hours, object.dec_degrees)),
@@ -3346,15 +3663,26 @@ fn push_target_summary(lines: &mut Vec<Line<'static>>, app: &App, target: &Targe
                 push_planet_summary(lines, app, planet);
             }
         }
+        Target::Moon => push_moon_summary(lines, app),
         Target::DeepSky(name) => {
             if let Some(object) = app.deep_sky_by_name(name) {
                 push_deep_sky_summary(lines, app, object);
             }
         }
         Target::Constellation(code) => {
-            let meta = constellations::meta_for(code);
-            lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
-            lines.push(Line::from(meta.zh.to_string()));
+            let meta = app.figure_meta(code);
+            match app.config.display.sky_culture {
+                SkyCulture::Western => {
+                    lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
+                    lines.push(Line::from(meta.zh.to_string()));
+                }
+                SkyCulture::Chinese => {
+                    lines.push(Line::from(format!("{} · {}", meta.zh, meta.en)));
+                    if let Some(pinyin) = constellations::pinyin_for(code) {
+                        lines.push(Line::from(pinyin.to_string()));
+                    }
+                }
+            }
         }
         Target::City(_) => {}
     }
@@ -3363,6 +3691,27 @@ fn push_target_summary(lines: &mut Vec<Line<'static>>, app: &App, target: &Targe
 fn push_planet_summary(lines: &mut Vec<Line<'static>>, app: &App, planet: planets::Planet) {
     push_position(lines, app, planet.name, planet.ra_hours, planet.dec_degrees);
     lines.push(Line::from(format!("planet · mag {:.1}", planet.magnitude)));
+}
+
+fn push_moon_summary(lines: &mut Vec<Line<'static>>, app: &App) {
+    let moon = astro::moon_position(app.now());
+    let phase = astro::moon_phase(app.now());
+    push_position(
+        lines,
+        app,
+        i18n::tr(app.config.language, "moon"),
+        moon.ra_hours,
+        moon.dec_degrees,
+    );
+    lines.push(Line::from(i18n::moon_phase_name(
+        app.config.language,
+        phase,
+    )));
+    lines.push(Line::from(format!(
+        "{}: {:.0}%",
+        i18n::tr(app.config.language, "illumination"),
+        phase.illumination * 100.0
+    )));
 }
 
 fn push_deep_sky_summary(
@@ -3427,9 +3776,19 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
             }
         }
         Some(Target::Constellation(code)) => {
-            let meta = constellations::meta_for(code);
-            lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
-            lines.push(Line::from(meta.zh.to_string()));
+            let meta = app.figure_meta(code);
+            match app.config.display.sky_culture {
+                SkyCulture::Western => {
+                    lines.push(Line::from(format!("{} · {}", meta.code, meta.en)));
+                    lines.push(Line::from(meta.zh.to_string()));
+                }
+                SkyCulture::Chinese => {
+                    lines.push(Line::from(format!("{} · {}", meta.zh, meta.en)));
+                    if let Some(pinyin) = constellations::pinyin_for(code) {
+                        lines.push(Line::from(pinyin.to_string()));
+                    }
+                }
+            }
             let visible = app.constellation_visible(code);
             if !visible {
                 lines.push(Line::from(Span::styled(
@@ -3456,7 +3815,7 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 on_off(language, visible)
             )));
             let segments = app
-                .constellation_lines
+                .active_constellation_lines()
                 .iter()
                 .filter(|line| line.code.eq_ignore_ascii_case(code))
                 .map(crate::constellations::ConstellationLine::segment_count)
@@ -3480,6 +3839,7 @@ fn target_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
                 )));
             }
         }
+        Some(Target::Moon) => push_moon_summary(&mut lines, app),
         Some(Target::DeepSky(name)) => {
             if let Some(object) = app.deep_sky_by_name(name) {
                 let label = if object.common.is_empty() {
@@ -3608,11 +3968,11 @@ fn recommendation_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
 
     let visible = app.visible_constellation_codes();
     if let Some(code) = visible.first() {
-        let meta = constellations::meta_for(code);
+        let meta = app.figure_meta(code);
         lines.push(Line::from(format!(
             "{}: {}",
-            i18n::tr(language, "constellation"),
-            meta.en
+            i18n::tr(language, app.figure_kind_key()),
+            constellations::display_name_for_culture(app.config.display.sky_culture, meta.code)
         )));
     }
     lines
@@ -3648,12 +4008,17 @@ fn sky_legend_lines(app: &App, palette: Palette) -> Vec<Line<'static>> {
         Line::from(format!(
             "{} {}",
             if unicode { '○' } else { 'o' },
-            i18n::tr(language, "legend_constellation")
+            i18n::tr(language, app.figure_node_legend_key())
         )),
         Line::from(format!(
             "{} {}",
             if unicode { '◇' } else { 'x' },
             i18n::tr(language, "legend_deep_sky")
+        )),
+        Line::from(format!(
+            "{} {}",
+            if unicode { '●' } else { 'M' },
+            i18n::tr(language, "moon")
         )),
         Line::from(format!("M/S {}", i18n::tr(language, "legend_planets"))),
     ]
@@ -4025,6 +4390,9 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
     ];
     if app.search.results.is_empty() {
         let empty_key = match app.search.mode {
+            app::SearchMode::Sky if app.config.display.sky_culture == SkyCulture::Chinese => {
+                "search_empty_chinese_sky"
+            }
             app::SearchMode::Sky => "search_empty",
             app::SearchMode::City => "city_search_empty",
         };
@@ -4064,7 +4432,7 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
 
 fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
-    let area = centered_rect(frame.area(), 60, 19);
+    let area = centered_rect(frame.area(), 60, 21);
     dim_modal_background(frame, area, palette);
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -4124,7 +4492,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
 fn settings_rows(app: &App) -> Vec<(String, String)> {
     let language = app.config.language;
     let display = &app.config.display;
-    debug_assert_eq!(app::settings_count(), 13);
+    debug_assert_eq!(app::settings_count(), 14);
     vec![
         (
             i18n::tr(language, "language").to_string(),
@@ -4161,6 +4529,10 @@ fn settings_rows(app: &App) -> Vec<(String, String)> {
         (
             i18n::tr(language, "lines").to_string(),
             on_off(language, display.constellations).to_string(),
+        ),
+        (
+            format!("{} (y)", i18n::tr(language, "sky_culture")),
+            sky_culture_label(language, display.sky_culture).to_string(),
         ),
         (
             i18n::tr(language, "side_panel").to_string(),
@@ -4287,7 +4659,12 @@ fn draw_help(frame: &mut Frame, app: &App, palette: Palette) {
     });
     frame.render_widget(block, area);
 
-    let (left, right) = help_columns_for_view(language, app.view_mode, palette);
+    let (left, right) = help_columns_for_view(
+        language,
+        app.view_mode,
+        app.config.display.sky_culture,
+        palette,
+    );
     if inner.width >= 62 {
         let columns = Layout::default()
             .direction(Direction::Horizontal)
@@ -4412,14 +4789,33 @@ fn draw_transparent_text(
 
 #[cfg(test)]
 fn help_columns(language: Language, palette: Palette) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
-    help_columns_for_view(language, ViewMode::Sky, palette)
+    help_columns_for_view(language, ViewMode::Sky, SkyCulture::Western, palette)
 }
 
 fn help_columns_for_view(
     language: Language,
     view_mode: ViewMode,
+    sky_culture: SkyCulture,
     palette: Palette,
 ) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let (zoom_label_zh, next_label_zh, prev_label_zh, line_label_zh) = match sky_culture {
+        SkyCulture::Western => ("放大星座", "下个星座", "上个星座", "星座连线"),
+        SkyCulture::Chinese => ("放大星官", "下个星官", "上个星官", "星官连线"),
+    };
+    let (zoom_label_en, next_label_en, prev_label_en, line_label_en) = match sky_culture {
+        SkyCulture::Western => (
+            "zoom constellation",
+            "next constellation",
+            "previous constellation",
+            "constellation lines",
+        ),
+        SkyCulture::Chinese => (
+            "zoom asterism",
+            "next asterism",
+            "previous asterism",
+            "asterism lines",
+        ),
+    };
     match (language, view_mode) {
         (Language::Zh, ViewMode::Sky) => (
             vec![
@@ -4441,9 +4837,9 @@ fn help_columns_for_view(
             vec![
                 help_section("星空进阶", palette),
                 help_item("x", "指针", palette),
-                help_item("z", "放大星座", palette),
-                help_item("Tab", "下个星座", palette),
-                help_item("S-Tab", "上个星座", palette),
+                help_item("z", zoom_label_zh, palette),
+                help_item("Tab", next_label_zh, palette),
+                help_item("S-Tab", prev_label_zh, palette),
                 help_item("h", "今晚推荐", palette),
                 help_item("v", "城市巡游", palette),
                 help_item("鼠标", "点天体/标签", palette),
@@ -4451,12 +4847,13 @@ fn help_columns_for_view(
                 help_section("显示/设置", palette),
                 help_item("m", "月相面板", palette),
                 help_item("l", "星名标签", palette),
-                help_item("c", "星座连线", palette),
+                help_item("c", line_label_zh, palette),
                 help_item("p", "行星", palette),
                 help_item("d", "深空天体", palette),
                 help_item("a", "动效", palette),
                 help_item("+ / -", "星等", palette),
                 help_item("t", "中英文", palette),
+                help_item("y", "星空体系", palette),
                 help_item("T", "主题", palette),
                 help_item("u", "字符集", palette),
             ],
@@ -4488,6 +4885,7 @@ fn help_columns_for_view(
                 Line::from(""),
                 help_section("显示/设置", palette),
                 help_item("t", "中英文", palette),
+                help_item("y", "星空体系", palette),
                 help_item("T", "主题", palette),
                 help_item("u", "字符集", palette),
                 help_item("a", "动效", palette),
@@ -4513,9 +4911,9 @@ fn help_columns_for_view(
             vec![
                 help_section("Sky Tools", palette),
                 help_item("x", "pointer", palette),
-                help_item("z", "zoom constellation", palette),
-                help_item("Tab", "next constellation", palette),
-                help_item("S-Tab", "previous constellation", palette),
+                help_item("z", zoom_label_en, palette),
+                help_item("Tab", next_label_en, palette),
+                help_item("S-Tab", prev_label_en, palette),
                 help_item("h", "tonight", palette),
                 help_item("v", "city tour", palette),
                 help_item("mouse", "pick object/label", palette),
@@ -4523,12 +4921,13 @@ fn help_columns_for_view(
                 help_section("Display", palette),
                 help_item("m", "moon panel", palette),
                 help_item("l", "star labels", palette),
-                help_item("c", "constellation lines", palette),
+                help_item("c", line_label_en, palette),
                 help_item("p", "planets", palette),
                 help_item("d", "deep sky", palette),
                 help_item("a", "animations", palette),
                 help_item("+ / -", "magnitude", palette),
                 help_item("t", "language", palette),
+                help_item("y", "sky culture", palette),
                 help_item("T", "theme", palette),
                 help_item("u", "charset", palette),
             ],
@@ -4560,6 +4959,7 @@ fn help_columns_for_view(
                 Line::from(""),
                 help_section("Display", palette),
                 help_item("t", "language", palette),
+                help_item("y", "sky culture", palette),
                 help_item("T", "theme", palette),
                 help_item("u", "charset", palette),
                 help_item("a", "animations", palette),
@@ -4617,10 +5017,10 @@ fn on_off(language: Language, value: bool) -> &'static str {
 fn landscape_label(language: Language, mode: LandscapeMode) -> &'static str {
     match (language, mode) {
         (Language::Zh, LandscapeMode::Off) => "关",
-        (Language::Zh, LandscapeMode::Horizon) => "地平线",
+        (Language::Zh, LandscapeMode::Horizon) => "地表环",
         (Language::Zh, LandscapeMode::Bearings) => "方位",
         (_, LandscapeMode::Off) => "off",
-        (_, LandscapeMode::Horizon) => "horizon",
+        (_, LandscapeMode::Horizon) => "ground ring",
         (_, LandscapeMode::Bearings) => "bearings",
     }
 }
@@ -4631,6 +5031,15 @@ fn sky_orientation_label(language: Language, orientation: SkyOrientation) -> &'s
         (Language::Zh, SkyOrientation::Map) => "地图",
         (_, SkyOrientation::Observer) => "observer",
         (_, SkyOrientation::Map) => "map",
+    }
+}
+
+fn sky_culture_label(language: Language, culture: SkyCulture) -> &'static str {
+    match (language, culture) {
+        (Language::Zh, SkyCulture::Western) => i18n::tr(language, "western"),
+        (Language::Zh, SkyCulture::Chinese) => i18n::tr(language, "chinese"),
+        (_, SkyCulture::Western) => "western",
+        (_, SkyCulture::Chinese) => "chinese",
     }
 }
 
@@ -4646,7 +5055,7 @@ mod tests {
     use super::*;
     use crate::{
         catalog::Catalog,
-        config::{Charset, Config, LandscapeMode, SkyOrientation},
+        config::{Charset, Config, LandscapeMode, SkyCulture, SkyOrientation},
     };
 
     fn app_for_test(start_setup: bool) -> App {
@@ -4660,12 +5069,53 @@ mod tests {
         )
     }
 
+    fn visible_stars_for_figure(app: &App, code: &str) -> Vec<astro::VisibleStar> {
+        let mut hips = Vec::new();
+        for line in app
+            .active_constellation_lines()
+            .iter()
+            .filter(|line| line.code.eq_ignore_ascii_case(code))
+        {
+            for hip in &line.hips {
+                if !hips.contains(hip) {
+                    hips.push(*hip);
+                }
+            }
+        }
+
+        hips.into_iter()
+            .enumerate()
+            .map(|(index, hip)| astro::VisibleStar {
+                star: app
+                    .catalog
+                    .stars
+                    .iter()
+                    .copied()
+                    .find(|star| star.hip == hip)
+                    .unwrap(),
+                x: 2 + (index * 5) % 90,
+                y: 2 + (index * 3) % 28,
+            })
+            .collect()
+    }
+
     #[test]
     fn renders_sky_at_common_sizes() {
         for (width, height) in [(80, 24), (120, 36), (44, 18)] {
             let backend = TestBackend::new(width, height);
             let mut terminal = Terminal::new(backend).unwrap();
             let mut app = app_for_test(false);
+            terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        }
+    }
+
+    #[test]
+    fn renders_chinese_sky_at_common_sizes() {
+        for (width, height) in [(80, 24), (120, 36), (44, 18)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = app_for_test(false);
+            app.config.display.sky_culture = SkyCulture::Chinese;
             terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         }
     }
@@ -4780,9 +5230,12 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains(i18n::tr(Language::En, "landscape")));
-        assert!(text.contains("horizon"));
+        assert!(text.contains("ground ring"));
         assert!(text.contains(i18n::tr(Language::En, "sky_orientation")));
         assert!(text.contains("observer"));
+        assert!(text.contains(i18n::tr(Language::En, "sky_culture")));
+        assert!(text.contains("(y)"));
+        assert!(text.contains("western"));
     }
 
     #[test]
@@ -4820,7 +5273,7 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
         let buffer = terminal.backend().buffer();
-        let modal = centered_rect(Rect::new(0, 0, 80, 24), 60, 19);
+        let modal = centered_rect(Rect::new(0, 0, 80, 24), 60, 21);
         let test_palette = palette(app.config.display.theme);
         for y in modal.top()..modal.bottom() {
             for x in modal.left()..modal.right() {
@@ -4848,6 +5301,7 @@ mod tests {
             "Tab 星座",
             "c 连线",
             "h 今晚",
+            "y 星空体系",
         ] {
             assert!(
                 !zh_footer.contains(advanced),
@@ -4868,6 +5322,7 @@ mod tests {
         assert!(!en_compact.contains("x pointer"));
         assert!(!en_compact.contains("+/- mag"));
         assert!(!en_compact.contains("c lines"));
+        assert!(!en_compact.contains("y sky culture"));
 
         let ground_footer = i18n::tr(Language::En, "ground_footer");
         assert!(ground_footer.contains("/ city"));
@@ -4916,6 +5371,28 @@ mod tests {
 
         assert_eq!(app.selected_constellation_code(), Some(code.as_str()));
         assert!(!app.pointer.active);
+    }
+
+    #[test]
+    fn multi_path_figures_render_one_label() {
+        let app = app_for_test(false);
+        let visible = visible_stars_for_figure(&app, "UMa");
+        let hits = constellation_label_hits(&visible, &app, 120, 36, true);
+        assert_eq!(
+            hits.iter().filter(|hit| hit.code == "UMa").count(),
+            1,
+            "western multi-path figure should only render one label"
+        );
+
+        let mut app = app_for_test(false);
+        app.config.display.sky_culture = SkyCulture::Chinese;
+        let visible = visible_stars_for_figure(&app, "CN290");
+        let hits = constellation_label_hits(&visible, &app, 120, 36, true);
+        assert_eq!(
+            hits.iter().filter(|hit| hit.code == "CN290").count(),
+            1,
+            "Chinese multi-path figure should only render one label"
+        );
     }
 
     #[test]
@@ -5425,6 +5902,7 @@ mod tests {
             "t中英文",
             "T主题",
             "u字符集",
+            "y星空体系",
         ] {
             let compact_expected = expected
                 .chars()
@@ -5438,9 +5916,31 @@ mod tests {
     }
 
     #[test]
+    fn chinese_sky_help_uses_asterism_copy() {
+        let (left, right) = help_columns_for_view(
+            Language::Zh,
+            ViewMode::Sky,
+            SkyCulture::Chinese,
+            palette(Theme::Midnight),
+        );
+        let compact_help = format!("{}{}", lines_text(&left), lines_text(&right))
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        assert!(compact_help.contains("z放大星官"));
+        assert!(compact_help.contains("Tab下个星官"));
+        assert!(compact_help.contains("c星官连线"));
+        assert!(!compact_help.contains("z放大星座"));
+    }
+
+    #[test]
     fn ground_help_uses_ground_shortcuts() {
-        let (left, right) =
-            help_columns_for_view(Language::En, ViewMode::Ground, palette(Theme::Midnight));
+        let (left, right) = help_columns_for_view(
+            Language::En,
+            ViewMode::Ground,
+            SkyCulture::Western,
+            palette(Theme::Midnight),
+        );
         let help_text = format!("{}{}", lines_text(&left), lines_text(&right));
         assert!(help_text.contains("Common"));
         assert!(help_text.contains("Globe Tools"));
@@ -5473,16 +5973,34 @@ mod tests {
         assert!(!off.contains('|'));
 
         app.config.display.landscape = LandscapeMode::Horizon;
-        let horizon = lines_text(&sky_lines(
+        let horizon_lines = sky_lines(
             &app,
             &[],
             &app.config.location,
             40,
             12,
             palette(Theme::Midnight),
-        ));
-        assert!(horizon.contains('_'));
+        );
+        let horizon = lines_text(&horizon_lines);
+        assert!(!horizon.contains('_'));
         assert!(!horizon.contains('|'));
+        assert!(
+            horizon_lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .all(|span| span.style.bg != Some(palette(Theme::Midnight).panel)),
+            "ground-ring landscape should not paint an opaque bottom band"
+        );
+        assert!(
+            horizon_lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| {
+                    span.content.as_ref() == " "
+                        && span.style.bg != Some(palette(Theme::Midnight).bg)
+                }),
+            "ground-ring landscape should paint textured cells outside the sky dome"
+        );
 
         app.config.display.landscape = LandscapeMode::Bearings;
         let bearings = lines_text(&sky_lines(
@@ -5493,8 +6011,56 @@ mod tests {
             12,
             palette(Theme::Midnight),
         ));
-        assert!(bearings.contains('_'));
+        assert!(!bearings.contains('_'));
         assert!(bearings.contains('|'));
+    }
+
+    #[test]
+    fn horizon_transition_draws_ground_ring_with_sky_shape() {
+        let mut app = app_for_test(false);
+        app.config.display.constellations = false;
+        app.config.display.deep_sky = false;
+        app.config.display.labels = false;
+        app.config.display.planets = false;
+        app.config.display.landscape = LandscapeMode::Horizon;
+        let test_palette = palette(Theme::Midnight);
+
+        let expanded = horizon_sky_grid(&app, 40, 12, test_palette, 0.5, 0.0);
+        let shaped = horizon_sky_grid(&app, 40, 12, test_palette, 0.5, 0.85);
+
+        let textured_cells = |grid: &[Vec<SkyCell>]| {
+            grid.iter()
+                .flat_map(|row| row.iter())
+                .filter(|cell| cell.ch == ' ' && cell.style.bg != Some(test_palette.bg))
+                .count()
+        };
+
+        assert_eq!(textured_cells(&expanded), 0);
+        assert!(textured_cells(&shaped) > 0);
+    }
+
+    #[test]
+    fn draw_moon_places_phase_marker_on_sky() {
+        let app = app_for_test(false);
+        let test_palette = palette(Theme::Midnight);
+        let style = Style::default().fg(test_palette.muted).bg(test_palette.bg);
+        let empty = SkyCell { ch: ' ', style };
+        let mut grid = vec![vec![empty; 20]; 8];
+
+        draw_moon(
+            &mut grid,
+            &app,
+            |_ra, _dec| Some((5, 2)),
+            test_palette,
+            true,
+        );
+
+        let expected = i18n::moon_symbol(astro::moon_phase(app.now()))
+            .chars()
+            .next()
+            .unwrap();
+        assert_eq!(grid[2][5].ch, expected);
+        assert_eq!(grid[2][5].style.fg, Some(test_palette.moon));
     }
 
     #[test]
@@ -5620,6 +6186,16 @@ mod tests {
         app.selected_target = Some(Target::Star(8102));
         let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
         assert!(text.contains("天仓五 / Tau Ceti"));
+    }
+
+    #[test]
+    fn target_lines_show_selected_moon() {
+        let mut app = app_for_test(false);
+        app.selected_target = Some(Target::Moon);
+        let text = lines_text(&target_lines(&app, palette(Theme::Midnight)));
+
+        assert!(text.contains("Moon"));
+        assert!(text.contains("Illumination"));
     }
 
     #[test]

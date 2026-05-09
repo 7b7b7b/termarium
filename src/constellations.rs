@@ -1,3 +1,7 @@
+use std::{collections::HashMap, sync::OnceLock};
+
+use crate::config::{Language, SkyCulture};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstellationLine {
     pub code: &'static str,
@@ -18,6 +22,10 @@ impl ConstellationLine {
 }
 
 const CONSTELLATION_LINES: &str = include_str!("../data/constellation_lines_hip.csv");
+const CHINESE_SKY_LINES: &str = include_str!("../data/chinese_sky_lines.csv");
+const CHINESE_SKY_FIGURES: &str = include_str!("../data/chinese_sky_figures.csv");
+const CHINESE_STAR_NAMES: &str = include_str!("../data/chinese_star_names.csv");
+static CHINESE_STAR_NAME_INDEX: OnceLock<HashMap<u32, Vec<ChineseStarName>>> = OnceLock::new();
 
 pub const CONSTELLATION_META: &[ConstellationMeta] = &[
     ConstellationMeta {
@@ -470,6 +478,14 @@ pub fn load() -> Vec<ConstellationLine> {
         .collect()
 }
 
+pub fn load_chinese() -> Vec<ConstellationLine> {
+    CHINESE_SKY_LINES
+        .lines()
+        .skip(1)
+        .filter_map(parse_line)
+        .collect()
+}
+
 pub fn meta_for(code: &str) -> ConstellationMeta {
     CONSTELLATION_META
         .iter()
@@ -482,13 +498,96 @@ pub fn meta_for(code: &str) -> ConstellationMeta {
         })
 }
 
-pub fn matches_query(code: &str, query: &str) -> bool {
+pub fn chinese_meta() -> Vec<ConstellationMeta> {
+    CHINESE_SKY_FIGURES
+        .lines()
+        .skip(1)
+        .filter_map(parse_chinese_meta)
+        .collect()
+}
+
+pub fn meta_for_culture(culture: SkyCulture, code: &str) -> ConstellationMeta {
+    match culture {
+        SkyCulture::Western => meta_for(code),
+        SkyCulture::Chinese => chinese_meta()
+            .into_iter()
+            .find(|meta| meta.code.eq_ignore_ascii_case(code))
+            .unwrap_or(ConstellationMeta {
+                code: "",
+                en: "Unknown",
+                zh: "未知",
+            }),
+    }
+}
+
+pub fn metadata_for_culture(culture: SkyCulture) -> Vec<ConstellationMeta> {
+    match culture {
+        SkyCulture::Western => CONSTELLATION_META.to_vec(),
+        SkyCulture::Chinese => chinese_meta(),
+    }
+}
+
+pub fn figure_label(culture: SkyCulture, code: &str, _language: Language) -> String {
+    let meta = meta_for_culture(culture, code);
+    match culture {
+        SkyCulture::Western => meta.code.to_string(),
+        SkyCulture::Chinese => meta.zh.to_string(),
+    }
+}
+
+pub fn display_name_for_culture(culture: SkyCulture, code: &str) -> String {
+    let meta = meta_for_culture(culture, code);
+    match culture {
+        SkyCulture::Western => meta.en.to_string(),
+        SkyCulture::Chinese => meta.zh.to_string(),
+    }
+}
+
+pub fn pinyin_for(code: &str) -> Option<&'static str> {
+    CHINESE_SKY_FIGURES.lines().skip(1).find_map(|line| {
+        let fields = split_csv_line(line);
+        (fields.get(0).copied() == Some(code))
+            .then(|| fields.get(2).copied().unwrap_or(""))
+            .filter(|value| !value.is_empty())
+    })
+}
+
+pub fn star_names_for_hip(hip: u32) -> Vec<ChineseStarName> {
+    chinese_star_name_index()
+        .get(&hip)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub fn chinese_star_name_for_hip(hip: u32) -> Option<ChineseStarName> {
+    chinese_star_name_index()
+        .get(&hip)
+        .and_then(|names| names.first().copied())
+}
+
+pub fn chinese_star_name_matches(hip: u32, query: &str) -> bool {
+    let normalized_query = normalize(query);
+    let compact_query = compact(query);
+    star_names_for_hip(hip).into_iter().any(|name| {
+        [name.zh, name.pinyin, name.en, name.desig]
+            .iter()
+            .any(|value| {
+                !value.is_empty()
+                    && (normalize(value).contains(&normalized_query)
+                        || compact(value).contains(&compact_query))
+            })
+    })
+}
+
+pub fn matches_query(culture: SkyCulture, code: &str, query: &str) -> bool {
     let query = query.trim().to_lowercase();
-    let meta = meta_for(code);
+    let meta = meta_for_culture(culture, code);
+    let pinyin = pinyin_for(code).unwrap_or("").to_lowercase();
     code.to_lowercase().contains(&query)
         || meta.code.to_lowercase().contains(&query)
         || meta.en.to_lowercase().contains(&query)
         || meta.zh.contains(query.as_str())
+        || pinyin.contains(query.as_str())
 }
 
 fn parse_line(line: &'static str) -> Option<ConstellationLine> {
@@ -503,6 +602,67 @@ fn parse_line(line: &'static str) -> Option<ConstellationLine> {
         .filter_map(|value| value.parse::<u32>().ok())
         .collect::<Vec<_>>();
     (hips.len() >= 2).then_some(ConstellationLine { code, hips })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChineseStarName {
+    pub hip: u32,
+    pub zh: &'static str,
+    pub pinyin: &'static str,
+    pub en: &'static str,
+    pub desig: &'static str,
+}
+
+fn chinese_star_name_index() -> &'static HashMap<u32, Vec<ChineseStarName>> {
+    CHINESE_STAR_NAME_INDEX.get_or_init(|| {
+        let mut index: HashMap<u32, Vec<ChineseStarName>> = HashMap::new();
+        for name in CHINESE_STAR_NAMES
+            .lines()
+            .skip(1)
+            .filter_map(parse_chinese_star_name)
+        {
+            index.entry(name.hip).or_default().push(name);
+        }
+        index
+    })
+}
+
+fn parse_chinese_meta(line: &'static str) -> Option<ConstellationMeta> {
+    let fields = split_csv_line(line);
+    Some(ConstellationMeta {
+        code: fields.first().copied()?.trim(),
+        zh: fields.get(1).copied().unwrap_or("").trim(),
+        en: fields.get(3).copied().unwrap_or("").trim(),
+    })
+}
+
+fn parse_chinese_star_name(line: &'static str) -> Option<ChineseStarName> {
+    let fields = split_csv_line(line);
+    Some(ChineseStarName {
+        hip: fields.first()?.parse().ok()?,
+        zh: fields.get(1).copied().unwrap_or("").trim(),
+        pinyin: fields.get(2).copied().unwrap_or("").trim(),
+        en: fields.get(3).copied().unwrap_or("").trim(),
+        desig: fields.get(4).copied().unwrap_or("").trim(),
+    })
+}
+
+fn split_csv_line(line: &'static str) -> Vec<&'static str> {
+    line.split(',').collect()
+}
+
+fn normalize(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn compact(value: &str) -> String {
+    normalize(value)
+        .chars()
+        .filter(|character| {
+            !character.is_whitespace()
+                && !matches!(character, '-' | '_' | '\'' | '"' | '.' | ',' | '/')
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -539,6 +699,73 @@ mod tests {
             for hip in line.hips {
                 assert!(hips.contains(&hip), "{} missing HIP {}", line.code, hip);
             }
+        }
+    }
+
+    #[test]
+    fn parses_chinese_sky_figures() {
+        let lines = load_chinese();
+        let codes = lines.iter().map(|line| line.code).collect::<BTreeSet<_>>();
+        let segments = lines
+            .iter()
+            .map(ConstellationLine::segment_count)
+            .sum::<usize>();
+        let meta = chinese_meta();
+
+        assert_eq!(meta.len(), 318);
+        assert_eq!(codes.len(), 312);
+        assert_eq!(lines.len(), 422);
+        assert_eq!(segments, 1136);
+        assert!(meta.iter().all(|entry| !entry.code.is_empty()));
+        assert!(meta.iter().all(|entry| !entry.zh.is_empty()));
+        assert!(meta.iter().all(|entry| !entry.en.is_empty()));
+    }
+
+    #[test]
+    fn all_chinese_line_stars_exist_in_catalog() {
+        let catalog = Catalog::load();
+        let hips = catalog
+            .stars
+            .iter()
+            .map(|star| star.hip)
+            .collect::<HashSet<_>>();
+
+        for line in load_chinese() {
+            for hip in line.hips {
+                assert!(hips.contains(&hip), "{} missing HIP {}", line.code, hip);
+            }
+        }
+    }
+
+    #[test]
+    fn chinese_asterism_search_matches_names() {
+        assert!(matches_query(SkyCulture::Chinese, "CN003", "参宿"));
+        assert!(matches_query(SkyCulture::Chinese, "CN003", "Shen Xiu"));
+        assert!(matches_query(SkyCulture::Chinese, "CN003", "Three Stars"));
+    }
+
+    #[test]
+    fn chinese_star_names_point_to_existing_stars() {
+        let catalog = Catalog::load();
+        let hips = catalog
+            .stars
+            .iter()
+            .map(|star| star.hip)
+            .collect::<HashSet<_>>();
+        let names = CHINESE_STAR_NAMES
+            .lines()
+            .skip(1)
+            .filter_map(parse_chinese_star_name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(names.len(), 3056);
+        for name in names {
+            assert!(
+                hips.contains(&name.hip),
+                "{} points to missing HIP {}",
+                name.zh,
+                name.hip
+            );
         }
     }
 }

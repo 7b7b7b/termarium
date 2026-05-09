@@ -4,7 +4,9 @@ use clap::ValueEnum;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-pub const CONFIG_VERSION: u8 = 3;
+pub const CONFIG_VERSION: u8 = 4;
+pub const MIN_LIMITING_MAGNITUDE: f64 = -2.0;
+pub const MAX_CONFIG_LIMITING_MAGNITUDE: f64 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
 #[serde(rename_all = "lowercase")]
@@ -197,6 +199,36 @@ impl fmt::Display for SkyOrientation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SkyCulture {
+    #[default]
+    Western,
+    Chinese,
+}
+
+impl SkyCulture {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Western => Self::Chinese,
+            Self::Chinese => Self::Western,
+        }
+    }
+
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Western => "western",
+            Self::Chinese => "chinese",
+        }
+    }
+}
+
+impl fmt::Display for SkyCulture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub version: u8,
@@ -237,6 +269,8 @@ pub struct DisplayConfig {
     pub landscape: LandscapeMode,
     #[serde(default = "default_sky_orientation")]
     pub sky_orientation: SkyOrientation,
+    #[serde(default)]
+    pub sky_culture: SkyCulture,
 }
 
 impl Default for Config {
@@ -263,6 +297,7 @@ impl Default for Config {
                 side_panel: true,
                 landscape: LandscapeMode::Horizon,
                 sky_orientation: SkyOrientation::Observer,
+                sky_culture: SkyCulture::Western,
             },
         }
     }
@@ -299,8 +334,12 @@ impl Config {
         if self.location.timezone.parse::<chrono_tz::Tz>().is_err() {
             return Err(format!("unsupported timezone: {}", self.location.timezone));
         }
-        if !(self.display.limiting_magnitude >= -2.0 && self.display.limiting_magnitude <= 6.0) {
-            return Err("limiting magnitude must be between -2.0 and 6.0".to_string());
+        if !(self.display.limiting_magnitude >= MIN_LIMITING_MAGNITUDE
+            && self.display.limiting_magnitude <= MAX_CONFIG_LIMITING_MAGNITUDE)
+        {
+            return Err(format!(
+                "limiting magnitude must be between {MIN_LIMITING_MAGNITUDE:.1} and {MAX_CONFIG_LIMITING_MAGNITUDE:.1}"
+            ));
         }
         Ok(())
     }
@@ -354,6 +393,13 @@ mod tests {
     }
 
     #[test]
+    fn config_allows_catalog_backed_faint_magnitude_limits() {
+        let mut config = Config::default();
+        config.display.limiting_magnitude = 10.3;
+        config.validate().unwrap();
+    }
+
+    #[test]
     fn default_landscape_is_horizon() {
         assert_eq!(Config::default().display.landscape, LandscapeMode::Horizon);
     }
@@ -376,7 +422,12 @@ mod tests {
     }
 
     #[test]
-    fn old_config_without_landscape_or_orientation_uses_new_defaults() {
+    fn default_sky_culture_is_western() {
+        assert_eq!(Config::default().display.sky_culture, SkyCulture::Western);
+    }
+
+    #[test]
+    fn old_config_without_landscape_orientation_or_culture_uses_new_defaults() {
         let raw = r#"{
             "version": 3,
             "language": "en",
@@ -402,6 +453,7 @@ mod tests {
         let config: Config = serde_json::from_str(raw).unwrap();
         assert_eq!(config.display.landscape, LandscapeMode::Horizon);
         assert_eq!(config.display.sky_orientation, SkyOrientation::Observer);
+        assert_eq!(config.display.sky_culture, SkyCulture::Western);
     }
 
     #[test]

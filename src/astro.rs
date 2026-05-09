@@ -28,6 +28,14 @@ pub struct MoonPhase {
     pub phase_fraction: f64,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MoonPosition {
+    pub ra_hours: f64,
+    pub dec_degrees: f64,
+    pub distance_earth_radii: f64,
+}
+
+#[cfg(test)]
 pub fn visible_stars(
     stars: &[Star],
     location: &Location,
@@ -107,6 +115,7 @@ pub fn horizontal_position(
     }
 }
 
+#[cfg(test)]
 pub fn project_dome(
     altitude: f64,
     azimuth: f64,
@@ -167,6 +176,120 @@ pub fn moon_phase(time: DateTime<Utc>) -> MoonPhase {
     }
 }
 
+pub fn moon_position(time: DateTime<Utc>) -> MoonPosition {
+    // Low-precision lunar elements from Paul Schlyter's compact formulae,
+    // with the largest longitude/latitude perturbations applied. This is
+    // accurate enough for a terminal sky map while staying lightweight.
+    let days = julian_day(time) - 2_451_543.5;
+    let node = normalize_degrees(125.1228 - 0.052_953_808_3 * days);
+    let inclination = 5.1454;
+    let argument_perigee = normalize_degrees(318.0634 + 0.164_357_322_3 * days);
+    let eccentricity = 0.054_9;
+    let mean_anomaly = normalize_degrees(115.3654 + 13.064_992_950_9 * days);
+
+    let eccentric_anomaly = solve_kepler_degrees(mean_anomaly, eccentricity);
+    let xv = eccentric_anomaly.cos() - eccentricity;
+    let yv = (1.0 - eccentricity * eccentricity).sqrt() * eccentric_anomaly.sin();
+    let true_anomaly = normalize_degrees(yv.atan2(xv).to_degrees());
+    let mut distance_earth_radii = 60.2666 * (xv * xv + yv * yv).sqrt();
+
+    let mut lon = normalize_degrees(true_anomaly + argument_perigee + node);
+    let mut lat = asin_deg(sin_deg(true_anomaly + argument_perigee) * sin_deg(inclination));
+
+    let sun_mean_anomaly = normalize_degrees(356.0470 + 0.985_600_258_5 * days);
+    let sun_argument_perihelion = normalize_degrees(282.9404 + 0.000_047_093_5 * days);
+    let sun_mean_longitude = normalize_degrees(sun_mean_anomaly + sun_argument_perihelion);
+    let moon_mean_longitude = normalize_degrees(node + argument_perigee + mean_anomaly);
+    let elongation = normalize_degrees(moon_mean_longitude - sun_mean_longitude);
+    let argument_latitude = normalize_degrees(moon_mean_longitude - node);
+
+    lon = normalize_degrees(
+        lon - 1.274 * sin_deg(mean_anomaly - 2.0 * elongation) + 0.658 * sin_deg(2.0 * elongation)
+            - 0.186 * sin_deg(sun_mean_anomaly)
+            - 0.059 * sin_deg(2.0 * mean_anomaly - 2.0 * elongation)
+            - 0.057 * sin_deg(mean_anomaly - 2.0 * elongation + sun_mean_anomaly)
+            + 0.053 * sin_deg(mean_anomaly + 2.0 * elongation)
+            + 0.046 * sin_deg(2.0 * elongation - sun_mean_anomaly)
+            + 0.041 * sin_deg(mean_anomaly - sun_mean_anomaly)
+            - 0.035 * sin_deg(elongation)
+            - 0.031 * sin_deg(mean_anomaly + sun_mean_anomaly)
+            - 0.015 * sin_deg(2.0 * argument_latitude - 2.0 * elongation)
+            + 0.011 * sin_deg(mean_anomaly - 4.0 * elongation),
+    );
+    lat = lat
+        - 0.173 * sin_deg(argument_latitude - 2.0 * elongation)
+        - 0.055 * sin_deg(mean_anomaly - argument_latitude - 2.0 * elongation)
+        - 0.046 * sin_deg(mean_anomaly + argument_latitude - 2.0 * elongation)
+        + 0.033 * sin_deg(argument_latitude + 2.0 * elongation)
+        + 0.017 * sin_deg(2.0 * mean_anomaly + argument_latitude);
+    distance_earth_radii +=
+        -0.58 * cos_deg(mean_anomaly - 2.0 * elongation) - 0.46 * cos_deg(2.0 * elongation);
+
+    let obliquity = 23.4393 - 0.000_000_356_3 * days;
+    let lon_rad = lon.to_radians();
+    let lat_rad = lat.to_radians();
+    let obliquity_rad = obliquity.to_radians();
+    let x = lon_rad.cos() * lat_rad.cos();
+    let y = lon_rad.sin() * lat_rad.cos();
+    let z = lat_rad.sin();
+    let equatorial_y = y * obliquity_rad.cos() - z * obliquity_rad.sin();
+    let equatorial_z = y * obliquity_rad.sin() + z * obliquity_rad.cos();
+    let ra = normalize_degrees(equatorial_y.atan2(x).to_degrees()) / 15.0;
+    let dec = equatorial_z.asin().to_degrees();
+
+    MoonPosition {
+        ra_hours: ra,
+        dec_degrees: dec,
+        distance_earth_radii,
+    }
+}
+
+pub fn moon_angular_radius_degrees(distance_earth_radii: f64) -> f64 {
+    (0.2725 / distance_earth_radii.max(1.0)).asin().to_degrees()
+}
+
+pub fn angular_separation_degrees(
+    ra_a_hours: f64,
+    dec_a_degrees: f64,
+    ra_b_hours: f64,
+    dec_b_degrees: f64,
+) -> f64 {
+    let ra_a = (ra_a_hours * 15.0).to_radians();
+    let ra_b = (ra_b_hours * 15.0).to_radians();
+    let dec_a = dec_a_degrees.to_radians();
+    let dec_b = dec_b_degrees.to_radians();
+    let cos_sep = dec_a.sin() * dec_b.sin() + dec_a.cos() * dec_b.cos() * (ra_a - ra_b).cos();
+    cos_sep.clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+pub fn moonlight_limiting_magnitude_loss(
+    moon_altitude: f64,
+    target_altitude: f64,
+    moon_target_separation: f64,
+    phase: MoonPhase,
+) -> f64 {
+    if moon_altitude <= 0.0 || target_altitude <= 0.0 || phase.illumination <= 0.01 {
+        return 0.0;
+    }
+
+    let phase_angle = (phase.phase_fraction * 360.0 - 180.0).abs();
+    let lunar_brightness =
+        10f64.powf(-0.4 * (3.84 + 0.026 * phase_angle + 0.000_000_004 * phase_angle.powi(4)));
+    let separation = moon_target_separation.clamp(10.0, 180.0);
+    let rho = separation.to_radians();
+    let scattering =
+        10f64.powf(5.36) * (1.06 + rho.cos().powi(2)) + 10f64.powf(6.15 - separation / 40.0);
+    let extinction = 0.23;
+    let moon_airmass = optical_airmass(moon_altitude);
+    let target_airmass = optical_airmass(target_altitude);
+    let moonlight_nl = scattering
+        * lunar_brightness
+        * 10f64.powf(-0.4 * extinction * moon_airmass)
+        * (1.0 - 10f64.powf(-0.4 * extinction * target_airmass));
+    let dark_sky_nl = 80.0;
+    (1.25 * (1.0 + moonlight_nl.max(0.0) / dark_sky_nl).log10()).clamp(0.0, 3.0)
+}
+
 pub fn local_sidereal_time_hours(time: DateTime<Utc>, longitude: f64) -> f64 {
     let jd = julian_day(time);
     let days_since_j2000 = jd - 2_451_545.0;
@@ -180,6 +303,33 @@ fn normalize_hours(hours: f64) -> f64 {
 
 fn normalize_degrees(degrees: f64) -> f64 {
     positive_mod(degrees, 360.0)
+}
+
+fn solve_kepler_degrees(mean_anomaly: f64, eccentricity: f64) -> f64 {
+    let mean = mean_anomaly.to_radians();
+    let mut eccentric = mean + eccentricity * mean.sin() * (1.0 + eccentricity * mean.cos());
+    for _ in 0..4 {
+        eccentric -= (eccentric - eccentricity * eccentric.sin() - mean)
+            / (1.0 - eccentricity * eccentric.cos());
+    }
+    eccentric
+}
+
+fn optical_airmass(altitude: f64) -> f64 {
+    let zenith = (90.0 - altitude.clamp(0.0, 90.0)).to_radians();
+    (1.0 - 0.96 * zenith.sin().powi(2)).powf(-0.5)
+}
+
+fn sin_deg(degrees: f64) -> f64 {
+    degrees.to_radians().sin()
+}
+
+fn cos_deg(degrees: f64) -> f64 {
+    degrees.to_radians().cos()
+}
+
+fn asin_deg(value: f64) -> f64 {
+    value.clamp(-1.0, 1.0).asin().to_degrees()
 }
 
 fn positive_mod(value: f64, modulus: f64) -> f64 {
@@ -251,5 +401,36 @@ mod tests {
         assert!((0.0..SYNODIC_MONTH_DAYS).contains(&phase.age_days));
         assert!((0.0..=1.0).contains(&phase.illumination));
         assert!((0.0..=1.0).contains(&phase.phase_fraction));
+    }
+
+    #[test]
+    fn moon_position_values_are_finite() {
+        let time = Utc.with_ymd_and_hms(2026, 5, 7, 14, 0, 0).unwrap();
+        let moon = moon_position(time);
+        assert!((0.0..24.0).contains(&moon.ra_hours));
+        assert!((-90.0..=90.0).contains(&moon.dec_degrees));
+        assert!((50.0..70.0).contains(&moon.distance_earth_radii));
+        assert!((0.2..0.35).contains(&moon_angular_radius_degrees(moon.distance_earth_radii)));
+    }
+
+    #[test]
+    fn moonlight_model_is_stronger_near_full_moon() {
+        let full = MoonPhase {
+            age_days: SYNODIC_MONTH_DAYS / 2.0,
+            illumination: 1.0,
+            phase_fraction: 0.5,
+        };
+        let new = MoonPhase {
+            age_days: 0.0,
+            illumination: 0.0,
+            phase_fraction: 0.0,
+        };
+        let near_full = moonlight_limiting_magnitude_loss(60.0, 60.0, 15.0, full);
+        let far_full = moonlight_limiting_magnitude_loss(60.0, 60.0, 120.0, full);
+        let near_new = moonlight_limiting_magnitude_loss(60.0, 60.0, 15.0, new);
+
+        assert!(near_full > far_full);
+        assert!(far_full > near_new);
+        assert_eq!(near_new, 0.0);
     }
 }

@@ -6,8 +6,9 @@ https://codeberg.org/astronexus/hyg
 https://www.astronexus.com/projects/hyg
 
 The HYG Database is licensed under Creative Commons Attribution-ShareAlike 4.0
-International (CC BY-SA 4.0). The filtered file in this repository keeps only
-the fields needed by Termarium:
+International (CC BY-SA 4.0). The filtered file in this repository keeps stars
+needed by Termarium's default bright-sky catalog plus the HIP entries required
+by the bundled Chinese sky-culture line catalog. It stores only these fields:
 
 hip, proper, ra, dec, mag, ci, con
 
@@ -18,6 +19,28 @@ authoritative nomenclature catalog; it is a convenience index for the TUI.
 
 Termarium code is licensed under MIT. The bundled star data remains licensed
 under CC BY-SA 4.0.
+
+Termarium also includes compact Chinese sky-culture figure and line data
+converted from the Stellarium Chinese sky culture.
+
+Source:
+https://github.com/Stellarium/stellarium-skycultures/tree/master/chinese
+
+The Stellarium Chinese sky culture data is licensed under Creative Commons
+Attribution-ShareAlike. Termarium converts its HIP-number figure paths and
+metadata into compact offline CSV files for the optional Chinese sky-culture
+mode.
+
+Termarium also includes compact Chinese star-name and figure-name search
+metadata converted from Celestial Data by Diego Hernangomez.
+
+Source:
+https://github.com/dieghernan/celestial_data
+
+Celestial Data is licensed under the BSD 3-Clause License. Its traditional
+Chinese constellations and star names are derived from Stellarium skycultures;
+Termarium uses them only as compact search names, pinyin, English labels, and
+HIP mappings.
 
 Termarium also includes a converted constellation-line catalog derived from
 ConstellationLines by Marc van der Sluys / hemel.waarnemen.com.
