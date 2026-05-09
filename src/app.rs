@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use crate::{
     astro,
     catalog::{Catalog, Star},
-    config::{self, Config, Language, Location, SkyOrientation},
+    config::{self, Config, Language, Location, SkyOrientation, Theme},
     constellations::{self, ConstellationLine},
     deep_sky::{self, DeepSkyObject},
     i18n, planets, star_aliases,
@@ -30,6 +30,7 @@ const GROUND_LAT_STEP: f64 = 2.5;
 const GROUND_LON_STEP: f64 = 2.5;
 const GROUND_HOLD_WINDOW: StdDuration = StdDuration::from_millis(160);
 const GROUND_FAST_STEP: f64 = 2.0;
+const SETTINGS_THEME_FIELD: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -506,6 +507,8 @@ pub struct SetupState {
 #[derive(Debug, Clone, Default)]
 pub struct SettingsState {
     pub selected: usize,
+    pub theme_selected: usize,
+    pub theme_picker: bool,
 }
 
 impl SetupState {
@@ -978,8 +981,7 @@ impl App {
                 self.save()?;
             }
             KeyCode::Char('T') => {
-                self.config.display.theme = self.config.display.theme.next();
-                self.save()?;
+                self.open_theme_picker();
             }
             KeyCode::Char('m') => {
                 self.config.display.moon_panel = !self.config.display.moon_panel;
@@ -1065,8 +1067,7 @@ impl App {
                 self.save()?;
             }
             KeyCode::Char('T') => {
-                self.config.display.theme = self.config.display.theme.next();
-                self.save()?;
+                self.open_theme_picker();
             }
             KeyCode::Char('a') => {
                 self.config.display.animations = !self.config.display.animations;
@@ -1082,6 +1083,10 @@ impl App {
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        if self.settings.theme_picker {
+            return self.handle_theme_picker_key(key);
+        }
+
         match key.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('o') => self.screen = Screen::Sky,
             KeyCode::Up | KeyCode::BackTab => {
@@ -1097,14 +1102,50 @@ impl App {
         Ok(())
     }
 
+    fn handle_theme_picker_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => self.settings.theme_picker = false,
+            KeyCode::Up | KeyCode::BackTab => {
+                self.select_theme(self.settings.theme_selected.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Tab => {
+                self.select_theme(self.settings.theme_selected.saturating_add(1));
+            }
+            KeyCode::Enter | KeyCode::Right => self.apply_selected_theme()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
     pub(crate) fn select_setting(&mut self, index: usize) {
         self.settings.selected = index.min(settings_count() - 1);
+    }
+
+    pub(crate) fn open_theme_picker(&mut self) {
+        self.screen = Screen::Settings;
+        self.settings.selected = SETTINGS_THEME_FIELD;
+        self.settings.theme_selected = self.config.display.theme.index();
+        self.settings.theme_picker = true;
+        self.message.clear();
+    }
+
+    pub(crate) fn select_theme(&mut self, index: usize) {
+        self.settings.theme_selected = index.min(Theme::ALL.len() - 1);
+    }
+
+    pub(crate) fn apply_selected_theme(&mut self) -> io::Result<()> {
+        self.config.display.theme = Theme::from_index(self.settings.theme_selected);
+        self.settings.theme_picker = false;
+        self.save()
     }
 
     pub(crate) fn adjust_setting(&mut self, forward: bool) -> io::Result<()> {
         match self.settings.selected {
             0 => self.config.language = self.config.language.toggle(),
-            1 => self.config.display.theme = self.config.display.theme.next(),
+            SETTINGS_THEME_FIELD => {
+                self.open_theme_picker();
+                return Ok(());
+            }
             2 => self.config.display.charset = self.config.display.charset.next(),
             3 => self.config.display.animations = !self.config.display.animations,
             4 => self.config.display.planets = !self.config.display.planets,
@@ -2947,7 +2988,7 @@ pub fn settings_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{DisplayConfig, LandscapeMode, SkyOrientation};
+    use crate::config::{DisplayConfig, LandscapeMode, SkyOrientation, Theme};
     use chrono::TimeZone;
 
     fn test_app(location: Location) -> App {
@@ -3587,6 +3628,48 @@ mod tests {
 
         app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
         assert_eq!(app.config.display.sky_orientation, SkyOrientation::Observer);
+    }
+
+    #[test]
+    fn theme_shortcut_opens_picker_without_cycling_theme() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        assert_eq!(app.config.display.theme, Theme::Midnight);
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('T'))).unwrap();
+
+        assert_eq!(app.screen, Screen::Settings);
+        assert_eq!(app.config.display.theme, Theme::Midnight);
+        assert!(app.settings.theme_picker);
+        assert_eq!(app.settings.selected, 1);
+    }
+
+    #[test]
+    fn theme_setting_opens_picker_and_applies_selected_theme() {
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.screen = Screen::Settings;
+        app.settings.selected = 1;
+
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+
+        assert!(app.settings.theme_picker);
+        assert_eq!(app.config.display.theme, Theme::Midnight);
+
+        app.handle_key(KeyEvent::from(KeyCode::Down)).unwrap();
+        app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
+
+        assert_eq!(app.config.display.theme, Theme::Aurora);
+        assert!(!app.settings.theme_picker);
+        assert_eq!(app.screen, Screen::Settings);
     }
 
     #[test]

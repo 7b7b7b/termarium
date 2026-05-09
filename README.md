@@ -36,7 +36,7 @@ Linux x64, and Windows x64.
 - Sun altitude, daylight/twilight state, sunset, and next sunrise
 - First-run city search on the globe, plus setup for custom coordinates and timezone
 - RA/Dec to Alt/Az sky projection for the current observer and time
-- Four themes plus ASCII/Unicode character modes
+- Programmer-friendly selectable themes plus ASCII/Unicode character modes
 - English by default, with in-app Chinese toggle
 
 ## Usage
@@ -50,6 +50,7 @@ termarium --lat 31.2304 --lon 121.4737 --name Shanghai
 termarium --lat 31.2304 --lon 121.4737 --name Shanghai --lang zh
 termarium --lat 31.2304 --lon 121.4737 --name Shanghai --tz Asia/Shanghai
 termarium --theme aurora --charset unicode
+termarium --theme tokyo-night
 termarium --time 2026-05-07T14:00:00Z
 ```
 
@@ -88,7 +89,7 @@ v       city tour
 a       toggle animations
 p       toggle planets
 d       toggle deep-sky objects
-T       cycle theme
+T       open theme menu
 u       cycle charset
 t       toggle English / Chinese
 m       toggle moon panel

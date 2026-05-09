@@ -181,12 +181,21 @@ fn handle_mouse_scroll(app: &mut App, down: bool) -> io::Result<()> {
             }
         }
         Screen::Settings => {
-            let index = if down {
-                app.settings.selected.saturating_add(1)
+            if app.settings.theme_picker {
+                let index = if down {
+                    app.settings.theme_selected.saturating_add(1)
+                } else {
+                    app.settings.theme_selected.saturating_sub(1)
+                };
+                app.select_theme(index);
             } else {
-                app.settings.selected.saturating_sub(1)
-            };
-            app.select_setting(index);
+                let index = if down {
+                    app.settings.selected.saturating_add(1)
+                } else {
+                    app.settings.selected.saturating_sub(1)
+                };
+                app.select_setting(index);
+            }
         }
         Screen::Setup => {
             app.move_setup_field(if down { 1 } else { 0 });
@@ -226,6 +235,10 @@ fn handle_search_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::
 }
 
 fn handle_settings_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    if app.settings.theme_picker {
+        return handle_theme_picker_click(app, column, row, area);
+    }
+
     let modal = settings_modal_inner(area);
     if !rect_contains(modal, column, row) {
         return Ok(());
@@ -235,6 +248,21 @@ fn handle_settings_click(app: &mut App, column: u16, row: u16, area: Rect) -> io
         app.select_setting(index);
         let forward = column >= modal.x.saturating_add(modal.width / 2);
         app.adjust_setting(forward)?;
+    }
+    Ok(())
+}
+
+fn handle_theme_picker_click(app: &mut App, column: u16, row: u16, area: Rect) -> io::Result<()> {
+    let modal = theme_picker_modal_inner(area);
+    if !rect_contains(modal, column, row) {
+        app.settings.theme_picker = false;
+        return Ok(());
+    }
+
+    let index = row.saturating_sub(modal.y) as usize;
+    if index < Theme::ALL.len() {
+        app.select_theme(index);
+        app.apply_selected_theme()?;
     }
     Ok(())
 }
@@ -341,6 +369,17 @@ fn settings_modal_inner(area: Rect) -> Rect {
     })
 }
 
+fn theme_picker_modal(area: Rect) -> Rect {
+    centered_rect(area, 40, Theme::ALL.len() as u16 + 4)
+}
+
+fn theme_picker_modal_inner(area: Rect) -> Rect {
+    theme_picker_modal(area).inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    })
+}
+
 fn setup_modal_inner(area: Rect) -> Rect {
     Block::default()
         .borders(Borders::ALL)
@@ -428,6 +467,104 @@ fn palette(theme: Theme) -> Palette {
             dim_line: Color::Rgb(86, 68, 48),
             selected: Color::Rgb(255, 235, 153),
             deep: Color::Rgb(222, 155, 255),
+        },
+        Theme::Dusk => Palette {
+            bg: Color::Rgb(15, 12, 31),
+            panel: Color::Rgb(27, 22, 48),
+            cyan: Color::Rgb(130, 219, 216),
+            silver: Color::Rgb(231, 226, 241),
+            muted: Color::Rgb(141, 132, 164),
+            veil: Color::Rgb(69, 61, 88),
+            moon: Color::Rgb(248, 207, 142),
+            warm: Color::Rgb(244, 166, 139),
+            line: Color::Rgb(125, 202, 210),
+            dim_line: Color::Rgb(73, 74, 103),
+            selected: Color::Rgb(255, 202, 156),
+            deep: Color::Rgb(214, 146, 255),
+        },
+        Theme::Forest => Palette {
+            bg: Color::Rgb(3, 15, 10),
+            panel: Color::Rgb(9, 28, 19),
+            cyan: Color::Rgb(117, 223, 180),
+            silver: Color::Rgb(218, 235, 218),
+            muted: Color::Rgb(109, 139, 119),
+            veil: Color::Rgb(50, 74, 58),
+            moon: Color::Rgb(238, 214, 151),
+            warm: Color::Rgb(247, 176, 99),
+            line: Color::Rgb(100, 191, 145),
+            dim_line: Color::Rgb(38, 87, 65),
+            selected: Color::Rgb(249, 226, 130),
+            deep: Color::Rgb(142, 172, 255),
+        },
+        Theme::Dracula => Palette {
+            bg: Color::Rgb(40, 42, 54),
+            panel: Color::Rgb(52, 55, 70),
+            cyan: Color::Rgb(139, 233, 253),
+            silver: Color::Rgb(248, 248, 242),
+            muted: Color::Rgb(98, 114, 164),
+            veil: Color::Rgb(80, 83, 104),
+            moon: Color::Rgb(241, 250, 140),
+            warm: Color::Rgb(255, 184, 108),
+            line: Color::Rgb(80, 250, 123),
+            dim_line: Color::Rgb(72, 104, 112),
+            selected: Color::Rgb(255, 121, 198),
+            deep: Color::Rgb(189, 147, 249),
+        },
+        Theme::Nord => Palette {
+            bg: Color::Rgb(46, 52, 64),
+            panel: Color::Rgb(59, 66, 82),
+            cyan: Color::Rgb(136, 192, 208),
+            silver: Color::Rgb(236, 239, 244),
+            muted: Color::Rgb(129, 161, 193),
+            veil: Color::Rgb(76, 86, 106),
+            moon: Color::Rgb(235, 203, 139),
+            warm: Color::Rgb(208, 135, 112),
+            line: Color::Rgb(143, 188, 187),
+            dim_line: Color::Rgb(81, 100, 122),
+            selected: Color::Rgb(180, 142, 173),
+            deep: Color::Rgb(163, 190, 140),
+        },
+        Theme::Gruvbox => Palette {
+            bg: Color::Rgb(40, 40, 40),
+            panel: Color::Rgb(50, 48, 47),
+            cyan: Color::Rgb(142, 192, 124),
+            silver: Color::Rgb(235, 219, 178),
+            muted: Color::Rgb(168, 153, 132),
+            veil: Color::Rgb(80, 73, 69),
+            moon: Color::Rgb(250, 189, 47),
+            warm: Color::Rgb(254, 128, 25),
+            line: Color::Rgb(131, 165, 152),
+            dim_line: Color::Rgb(102, 92, 84),
+            selected: Color::Rgb(251, 73, 52),
+            deep: Color::Rgb(211, 134, 155),
+        },
+        Theme::SolarizedDark => Palette {
+            bg: Color::Rgb(0, 43, 54),
+            panel: Color::Rgb(7, 54, 66),
+            cyan: Color::Rgb(42, 161, 152),
+            silver: Color::Rgb(238, 232, 213),
+            muted: Color::Rgb(101, 123, 131),
+            veil: Color::Rgb(88, 110, 117),
+            moon: Color::Rgb(181, 137, 0),
+            warm: Color::Rgb(203, 75, 22),
+            line: Color::Rgb(38, 139, 210),
+            dim_line: Color::Rgb(63, 93, 101),
+            selected: Color::Rgb(220, 50, 47),
+            deep: Color::Rgb(108, 113, 196),
+        },
+        Theme::TokyoNight => Palette {
+            bg: Color::Rgb(26, 27, 38),
+            panel: Color::Rgb(36, 40, 59),
+            cyan: Color::Rgb(125, 207, 255),
+            silver: Color::Rgb(192, 202, 245),
+            muted: Color::Rgb(86, 95, 137),
+            veil: Color::Rgb(65, 72, 104),
+            moon: Color::Rgb(224, 175, 104),
+            warm: Color::Rgb(255, 158, 100),
+            line: Color::Rgb(115, 218, 202),
+            dim_line: Color::Rgb(62, 88, 120),
+            selected: Color::Rgb(187, 154, 247),
+            deep: Color::Rgb(247, 118, 142),
         },
         Theme::Mono => Palette {
             bg: Color::Black,
@@ -3978,6 +4115,10 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
             .wrap(Wrap { trim: false }),
         inner,
     );
+
+    if app.settings.theme_picker {
+        draw_theme_picker(frame, app, palette);
+    }
 }
 
 fn settings_rows(app: &App) -> Vec<(String, String)> {
@@ -3991,7 +4132,7 @@ fn settings_rows(app: &App) -> Vec<(String, String)> {
         ),
         (
             i18n::tr(language, "theme").to_string(),
-            format!("{:?}", display.theme).to_lowercase(),
+            format!("{} >", display.theme.label()),
         ),
         (
             i18n::tr(language, "charset").to_string(),
@@ -4038,6 +4179,62 @@ fn settings_rows(app: &App) -> Vec<(String, String)> {
             format!("{:.1}", display.limiting_magnitude),
         ),
     ]
+}
+
+fn draw_theme_picker(frame: &mut Frame, app: &App, palette: Palette) {
+    let language = app.config.language;
+    let area = theme_picker_modal(frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(format!(" {} ", i18n::tr(language, "theme_picker")))
+        .title_style(
+            Style::default()
+                .fg(palette.cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.cyan))
+        .style(Style::default().bg(palette.panel));
+    let inner = block.inner(area).inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    frame.render_widget(block, area);
+
+    let current = app.config.display.theme;
+    let mut lines = Vec::new();
+    for (index, theme) in Theme::ALL.into_iter().enumerate() {
+        let selected = index == app.settings.theme_selected;
+        let marker = if theme == current { "*" } else { " " };
+        let style = if selected {
+            Style::default()
+                .fg(palette.selected)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.silver)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                if selected { "> " } else { "  " },
+                Style::default().fg(palette.cyan),
+            ),
+            Span::styled(marker, Style::default().fg(palette.warm)),
+            Span::styled(" ", Style::default()),
+            Span::styled(theme.label(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        i18n::tr(language, "theme_picker_hint"),
+        Style::default().fg(palette.muted),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().fg(palette.silver).bg(palette.panel))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
 }
 
 fn draw_opening(frame: &mut Frame, app: &App, palette: Palette) {
@@ -4586,6 +4783,32 @@ mod tests {
         assert!(text.contains("horizon"));
         assert!(text.contains(i18n::tr(Language::En, "sky_orientation")));
         assert!(text.contains("observer"));
+    }
+
+    #[test]
+    fn renders_theme_picker_with_programmer_themes() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.screen = Screen::Settings;
+        app.settings.selected = 1;
+        app.settings.theme_picker = true;
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal, 100, 30);
+        for expected in [
+            "dracula",
+            "nord",
+            "gruvbox",
+            "solarized-dark",
+            "tokyo-night",
+        ] {
+            assert!(
+                text.contains(expected),
+                "{expected} missing from theme picker"
+            );
+        }
     }
 
     #[test]
@@ -5456,7 +5679,7 @@ mod tests {
 
     #[test]
     fn renders_themes_and_charsets() {
-        for theme in [Theme::Midnight, Theme::Aurora, Theme::Amber, Theme::Mono] {
+        for theme in Theme::ALL {
             for charset in [Charset::Auto, Charset::Ascii, Charset::Unicode] {
                 let backend = TestBackend::new(100, 30);
                 let mut terminal = Terminal::new(backend).unwrap();
