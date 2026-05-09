@@ -108,6 +108,8 @@ jobs:
 
   npm:
     name: Publish npm package
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -121,6 +123,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
 
       - name: Check package contents
         run: npm pack --dry-run
@@ -133,6 +136,15 @@ jobs:
           version=$(node -p "require('./package.json').version")
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "${{ steps.package.outputs.version }}" != "$tag_version" ]; then
+            echo "package.json version ${{ steps.package.outputs.version }} does not match tag $GITHUB_REF_NAME"
+            exit 1
+          fi
 
       - name: Check whether npm version exists
         id: npm
