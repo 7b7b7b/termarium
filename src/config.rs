@@ -50,23 +50,62 @@ impl FromStr for Language {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum, Default)]
-#[serde(rename_all = "lowercase")]
-#[clap(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
+#[clap(rename_all = "kebab-case")]
 pub enum Theme {
     #[default]
     Midnight,
     Aurora,
     Amber,
+    Dusk,
+    Forest,
+    Dracula,
+    Nord,
+    Gruvbox,
+    SolarizedDark,
+    TokyoNight,
     Mono,
 }
 
 impl Theme {
-    pub fn next(self) -> Self {
+    pub const ALL: [Self; 11] = [
+        Self::Midnight,
+        Self::Aurora,
+        Self::Amber,
+        Self::Dusk,
+        Self::Forest,
+        Self::Dracula,
+        Self::Nord,
+        Self::Gruvbox,
+        Self::SolarizedDark,
+        Self::TokyoNight,
+        Self::Mono,
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .expect("theme list should contain every theme")
+    }
+
+    pub fn from_index(index: usize) -> Self {
+        Self::ALL[index.min(Self::ALL.len() - 1)]
+    }
+
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Midnight => Self::Aurora,
-            Self::Aurora => Self::Amber,
-            Self::Amber => Self::Mono,
-            Self::Mono => Self::Midnight,
+            Self::Midnight => "midnight",
+            Self::Aurora => "aurora",
+            Self::Amber => "amber",
+            Self::Dusk => "dusk",
+            Self::Forest => "forest",
+            Self::Dracula => "dracula",
+            Self::Nord => "nord",
+            Self::Gruvbox => "gruvbox",
+            Self::SolarizedDark => "solarized-dark",
+            Self::TokyoNight => "tokyo-night",
+            Self::Mono => "mono",
         }
     }
 }
@@ -325,6 +364,15 @@ mod tests {
             Config::default().display.sky_orientation,
             SkyOrientation::Observer
         );
+    }
+
+    #[test]
+    fn theme_indices_cover_every_theme() {
+        for (index, theme) in Theme::ALL.into_iter().enumerate() {
+            assert_eq!(theme.index(), index);
+            assert_eq!(Theme::from_index(index), theme);
+        }
+        assert_eq!(Theme::from_index(usize::MAX), Theme::Mono);
     }
 
     #[test]
