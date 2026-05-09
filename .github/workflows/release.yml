@@ -12,6 +12,7 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.target }}
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,7 +30,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -73,6 +74,7 @@ jobs:
   release:
     name: Publish Release
     needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -104,7 +106,7 @@ jobs:
             release-assets/termarium-*.zip
             release-assets/SHA256SUMS
 
-  publish-npm:
+  npm:
     name: Publish npm package
     needs: release
     if: startsWith(github.ref, 'refs/tags/v')
@@ -114,24 +116,46 @@ jobs:
       id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Setup Node.js
+      - name: Install Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Check package contents
+        run: npm pack --dry-run
+
+      - name: Read package metadata
+        id: package
+        shell: bash
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Verify tag matches package version
         shell: bash
         run: |
-          package_version="$(node -p "require('./package.json').version")"
           tag_version="${GITHUB_REF_NAME#v}"
-          if [ "$package_version" != "$tag_version" ]; then
-            echo "package.json version $package_version does not match tag $GITHUB_REF_NAME"
+          if [ "${{ steps.package.outputs.version }}" != "$tag_version" ]; then
+            echo "package.json version ${{ steps.package.outputs.version }} does not match tag $GITHUB_REF_NAME"
             exit 1
           fi
 
+      - name: Check whether npm version exists
+        id: npm
+        shell: bash
+        run: |
+          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
+        if: steps.npm.outputs.published != 'true'
         run: npm publish --access public
