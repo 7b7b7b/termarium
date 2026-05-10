@@ -4,6 +4,7 @@ mod catalog;
 mod config;
 mod constellations;
 mod deep_sky;
+mod export;
 mod i18n;
 mod planets;
 mod solar;

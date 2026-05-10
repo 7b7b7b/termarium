@@ -61,6 +61,8 @@ Inside the TUI:
 /       search sky targets
 s       setup location; type on the preset row to search city presets
 g       flip between sky and globe
+e       export a high-resolution share card
+E       start / stop share animation recording
 o       settings panel
 ?       detailed help
 ```
@@ -87,6 +89,8 @@ Tab     next visible constellation
 S-Tab   previous visible constellation
 h       toggle tonight panel
 v       city tour
+e       export PNG/SVG share card from an offscreen 2K render
+E       record GIF animation; MP4/WebM are available when ffmpeg is installed
 a       toggle animations
 p       toggle planets
 d       toggle deep-sky objects

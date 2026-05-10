@@ -14,6 +14,7 @@ use crate::{
     config::{self, Config, Language, Location, SkyCulture, SkyOrientation, Theme},
     constellations::{self, ConstellationLine},
     deep_sky::{self, DeepSkyObject},
+    export::ExportState,
     i18n, planets, star_aliases,
 };
 
@@ -705,6 +706,10 @@ impl ZoomRenderView {
     pub(crate) fn project_horizontal(&self, altitude: f64, azimuth: f64) -> Option<(usize, usize)> {
         self.mapper.project_horizontal(altitude, azimuth)
     }
+
+    pub(crate) fn source_dome_offset(&self, x: usize, y: usize) -> Option<(f64, f64)> {
+        self.mapper.source_dome_offset(x, y)
+    }
 }
 
 pub struct App {
@@ -721,6 +726,7 @@ pub struct App {
     pub search: SearchState,
     pub pointer: PointerState,
     pub ground: GroundState,
+    pub export: ExportState,
     pub session_location: Option<Location>,
     pub selected_target: Option<Target>,
     pub constellation_zoom: bool,
@@ -794,6 +800,7 @@ impl App {
             search,
             pointer: PointerState::default(),
             ground,
+            export: ExportState::default(),
             session_location: None,
             selected_target: None,
             constellation_zoom: false,
@@ -2556,7 +2563,7 @@ impl App {
         self.pointer.hits.clone()
     }
 
-    fn pointer_target_label(&self, target: &Target) -> String {
+    pub(crate) fn pointer_target_label(&self, target: &Target) -> String {
         match target {
             Target::Star(hip) => self
                 .star_by_hip(*hip)
@@ -2582,6 +2589,12 @@ impl App {
                 .map(|preset| preset.en.to_string())
                 .unwrap_or_else(|| "city".to_string()),
         }
+    }
+
+    pub(crate) fn export_target_label(&self) -> Option<String> {
+        self.selected_target
+            .as_ref()
+            .map(|target| self.pointer_target_label(target))
     }
 
     #[cfg(test)]
@@ -2887,6 +2900,35 @@ impl SkyViewMapper {
             self.orientation,
         )?;
         self.map_source(x, y)
+    }
+
+    fn source_dome_offset(self, x: usize, y: usize) -> Option<(f64, f64)> {
+        if self.width == 0 || self.height == 0 || self.source_width == 0 || self.source_height == 0
+        {
+            return None;
+        }
+        let span_x = (self.viewport.max_x - self.viewport.min_x).max(1.0);
+        let span_y = (self.viewport.max_y - self.viewport.min_y).max(1.0);
+        let target_x = if self.width <= 1 {
+            0.0
+        } else {
+            x.min(self.width - 1) as f64 / self.width.saturating_sub(1) as f64
+        };
+        let target_y = if self.height <= 1 {
+            0.0
+        } else {
+            y.min(self.height - 1) as f64 / self.height.saturating_sub(1) as f64
+        };
+        let source_x = self.viewport.min_x + span_x * target_x;
+        let source_y = self.viewport.min_y + span_y * target_y;
+        let center_x = self.source_width.saturating_sub(1) as f64 / 2.0;
+        let center_y = self.source_height.saturating_sub(1) as f64 / 2.0;
+        let radius_x = center_x.max(1.0);
+        let radius_y = center_y.max(1.0);
+        Some((
+            (source_x - center_x) / radius_x,
+            (center_y - source_y) / radius_y,
+        ))
     }
 }
 

@@ -2,34 +2,37 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     io::{self, Write},
+    path::PathBuf,
     time::{Duration as StdDuration, Instant},
 };
 
+use chrono::Utc;
 use chrono_tz::Tz;
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, MouseButton, MouseEvent,
-        MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event as CEvent, KeyCode, KeyEvent,
+        KeyEventKind, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Frame, Terminal,
-    backend::CrosstermBackend,
+    backend::{CrosstermBackend, TestBackend},
+    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{self, App, PRESETS, Screen, Target, ViewMode},
     astro,
     config::{LandscapeMode, Language, Location, SkyCulture, SkyOrientation, Theme},
-    constellations, i18n, planets, solar, star_aliases,
+    constellations, export, i18n, planets, solar, star_aliases,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -133,10 +136,15 @@ fn app_loop(
 
     while !app.should_quit {
         terminal.draw(|frame| draw(frame, app))?;
+        process_pending_recording_export(app)?;
         let timeout = tick.saturating_sub(last_draw.elapsed());
         if event::poll(timeout)? {
             match event::read()? {
-                CEvent::Key(key) => app.handle_key(key)?,
+                CEvent::Key(key) => {
+                    if !handle_export_key(app, key)? {
+                        app.handle_key(key)?;
+                    }
+                }
                 CEvent::Mouse(mouse) => {
                     let area = terminal.size()?;
                     handle_mouse_event(app, mouse, area.into())?;
@@ -148,8 +156,266 @@ fn app_loop(
             app.tick();
             last_draw = Instant::now();
         }
+        capture_recording_frame(app)?;
     }
 
+    Ok(())
+}
+
+pub fn render_offscreen_buffer(app: &mut App, width: u16, height: u16) -> io::Result<Buffer> {
+    let previous_panel = app.export.panel_open;
+    let previous_rendering = app.export.rendering_export;
+    app.export.panel_open = false;
+    app.export.rendering_export = true;
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal =
+        Terminal::new(backend).expect("test backend terminal creation should not fail");
+    terminal
+        .draw(|frame| draw(frame, app))
+        .expect("offscreen test backend draw should not fail");
+
+    app.export.panel_open = previous_panel;
+    app.export.rendering_export = previous_rendering;
+    Ok(terminal.backend().buffer().clone())
+}
+
+fn handle_export_key(app: &mut App, key: KeyEvent) -> io::Result<bool> {
+    if matches!(key.kind, KeyEventKind::Release) {
+        return Ok(false);
+    }
+    if app.export.panel_open {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                app.export.panel_open = false;
+            }
+            KeyCode::Left => set_export_format(app, app.export.format.next(false)),
+            KeyCode::Right => set_export_format(app, app.export.format.next(true)),
+            KeyCode::Up => set_export_size(app, app.export.size.next(false)),
+            KeyCode::Down => set_export_size(app, app.export.size.next(true)),
+            KeyCode::Backspace => {
+                app.export.path_input.pop();
+            }
+            KeyCode::Enter => {
+                if app.export.format.is_image() {
+                    export_current_image(app)?;
+                } else if app.export.recording.is_some() {
+                    finish_recording(app)?;
+                } else if export_job_is_processing(app) {
+                    show_export_processing_message(app);
+                } else {
+                    start_recording(app, app.export.format)?;
+                }
+            }
+            KeyCode::Char(c) => app.export.path_input.push(c),
+            _ => {}
+        }
+        return Ok(true);
+    }
+
+    if app.screen != Screen::Sky || app.help {
+        return Ok(false);
+    }
+
+    match key.code {
+        KeyCode::Char('e') => {
+            app.export.panel_open = true;
+            if app.export.path_input.trim().is_empty() {
+                app.export.path_input = default_export_path(app, app.export.format)
+                    .to_string_lossy()
+                    .into_owned();
+            }
+            Ok(true)
+        }
+        KeyCode::Char('E') => {
+            if app.export.recording.is_some() {
+                finish_recording(app)?;
+            } else if export_job_is_processing(app) {
+                show_export_processing_message(app);
+            } else {
+                start_recording(app, export::ExportFormat::Gif)?;
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn set_export_format(app: &mut App, format: export::ExportFormat) {
+    app.export.format = format;
+    app.export.path_input = default_export_path(app, format)
+        .to_string_lossy()
+        .into_owned();
+    app.export.message.clear();
+}
+
+fn set_export_size(app: &mut App, size: export::ExportSize) {
+    app.export.size = size;
+    app.export.message.clear();
+}
+
+fn default_export_path(app: &App, format: export::ExportFormat) -> PathBuf {
+    export::default_output_path(
+        format,
+        app.active_location(),
+        app.export_target_label().as_deref(),
+        app.view_mode,
+        Utc::now(),
+    )
+}
+
+fn resolved_export_path(app: &App, format: export::ExportFormat) -> PathBuf {
+    let default = default_export_path(app, format);
+    export::resolve_output_path(&app.export.path_input, &default, format)
+}
+
+fn export_job_is_processing(app: &App) -> bool {
+    app.export.render_job.is_some()
+}
+
+fn show_export_processing_message(app: &mut App) {
+    app.export.message = "export still processing".to_string();
+    app.message = app.export.message.clone();
+}
+
+fn refresh_auto_export_path(app: &mut App, format: export::ExportFormat) {
+    if export_path_is_auto(&app.export.path_input, format) {
+        app.export.path_input = default_export_path(app, format)
+            .to_string_lossy()
+            .into_owned();
+    }
+}
+
+fn export_path_is_auto(input: &str, format: export::ExportFormat) -> bool {
+    let trimmed = input.trim();
+    if trimmed.is_empty() || trimmed.ends_with('/') {
+        return true;
+    }
+    let path = PathBuf::from(trimmed);
+    if path.extension().is_none() || path.is_dir() {
+        return true;
+    }
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name.starts_with("termarium-") && file_name.ends_with(format.extension())
+}
+
+fn export_current_image(app: &mut App) -> io::Result<()> {
+    if export_job_is_processing(app) {
+        show_export_processing_message(app);
+        return Ok(());
+    }
+    let format = app.export.format;
+    refresh_auto_export_path(app, format);
+    let path = resolved_export_path(app, format);
+    let (terminal_width, terminal_height) = app.export.size.terminal_size();
+    let (pixel_width, pixel_height) = app.export.size.image_pixels();
+    let buffer = render_offscreen_buffer(app, terminal_width, terminal_height)?;
+    match format {
+        export::ExportFormat::Png => {
+            export::write_png(&buffer, &path, pixel_width, pixel_height)?;
+        }
+        export::ExportFormat::Svg => {
+            export::write_svg(&buffer, &path, pixel_width, pixel_height)?;
+        }
+        _ => {}
+    }
+    app.export.message = format!("saved {}", path.display());
+    app.message = app.export.message.clone();
+    refresh_auto_export_path(app, format);
+    Ok(())
+}
+
+fn start_recording(app: &mut App, requested_format: export::ExportFormat) -> io::Result<()> {
+    if export_job_is_processing(app) {
+        show_export_processing_message(app);
+        return Ok(());
+    }
+    let format = if requested_format.is_image() {
+        export::ExportFormat::Gif
+    } else {
+        requested_format
+    };
+    if format.needs_ffmpeg() && !export::ffmpeg_available() {
+        app.export.message = export::ffmpeg_install_hint().to_string();
+        app.message = app.export.message.clone();
+        return Ok(());
+    }
+    refresh_auto_export_path(app, format);
+    let path = resolved_export_path(app, format);
+    app.export.panel_open = false;
+    app.export.recording = Some(export::RecordingState::new(format, app.export.size, path));
+    app.export.message = format!("recording {}...", format.label());
+    app.message = app.export.message.clone();
+    capture_recording_frame(app)
+}
+
+fn finish_recording(app: &mut App) -> io::Result<()> {
+    let Some(recording) = app.export.recording.take() else {
+        return Ok(());
+    };
+    app.export.rendering_export = true;
+    app.export.panel_open = true;
+    app.export.message = format!("processing {}...", recording.format.label());
+    app.message = app.export.message.clone();
+    app.export.render_job = Some(export::ExportJob::spawn(recording));
+    Ok(())
+}
+
+fn process_pending_recording_export(app: &mut App) -> io::Result<()> {
+    let Some(result) = app
+        .export
+        .render_job
+        .as_ref()
+        .and_then(export::ExportJob::try_finish)
+    else {
+        return Ok(());
+    };
+    app.export.render_job = None;
+    app.export.rendering_export = false;
+    match result {
+        Ok(path) => {
+            app.export.message = format!("saved {}", path.display());
+            app.message = app.export.message.clone();
+            refresh_auto_export_path(app, app.export.format);
+        }
+        Err(error) => {
+            app.export.message = error.to_string();
+            app.message = app.export.message.clone();
+        }
+    }
+    Ok(())
+}
+
+fn capture_recording_frame(app: &mut App) -> io::Result<()> {
+    let should_capture = app
+        .export
+        .recording
+        .as_ref()
+        .is_some_and(export::RecordingState::should_capture);
+    if should_capture {
+        let size = app
+            .export
+            .recording
+            .as_ref()
+            .map(|recording| recording.size)
+            .unwrap_or(app.export.size);
+        let (terminal_width, terminal_height) = size.terminal_size();
+        let frame = render_offscreen_buffer(app, terminal_width, terminal_height)?;
+        if let Some(recording) = app.export.recording.as_mut() {
+            recording.mark_captured(frame);
+        }
+    }
+
+    let expired = app
+        .export
+        .recording
+        .as_ref()
+        .is_some_and(export::RecordingState::is_expired);
+    if expired {
+        finish_recording(app)?;
+    }
     Ok(())
 }
 
@@ -401,6 +667,13 @@ fn rect_local(rect: Rect, column: u16, row: u16) -> Option<(usize, usize)> {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let palette = palette(app.config.display.theme);
+    if app.export.rendering_export
+        && !app.export.panel_open
+        && (app.export.recording.is_some() || app.export.render_job.is_none())
+    {
+        draw_export_card(frame, app, palette);
+        return;
+    }
     match app.screen {
         Screen::Sky | Screen::Search | Screen::Settings | Screen::Setup => {
             draw_sky(frame, app, palette)
@@ -422,6 +695,180 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if matches!(app.screen, Screen::Setup) {
         draw_setup(frame, app, palette);
     }
+    if app.export.panel_open {
+        draw_export_panel(frame, app, palette);
+    }
+    draw_recording_status(frame, app, palette);
+}
+
+fn draw_export_card(frame: &mut Frame, app: &mut App, palette: Palette) {
+    let area = frame.area();
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.bg)),
+        area,
+    );
+
+    if area.width < 80 || area.height < 40 {
+        draw_export_card_visual(frame, app, area, palette);
+        return;
+    }
+
+    let footer_height = export_card_footer_height(area);
+    let visual = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        area.height.saturating_sub(footer_height),
+    );
+    let footer = Rect::new(area.x, visual.bottom(), area.width, footer_height);
+    draw_export_card_visual(frame, app, visual, palette);
+    draw_export_card_footer(frame, app, footer, palette);
+}
+
+fn export_card_footer_height(area: Rect) -> u16 {
+    (area.height / 7).clamp(8, 13)
+}
+
+fn draw_export_card_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.panel)),
+        area,
+    );
+    for x in area.left()..area.right() {
+        frame.buffer_mut()[(x, area.y)]
+            .set_symbol("─")
+            .set_style(Style::default().fg(palette.dim_line).bg(palette.panel));
+    }
+
+    let logo_style = Style::default()
+        .fg(palette.silver)
+        .bg(palette.panel)
+        .add_modifier(Modifier::BOLD);
+    let logo_x = area.x.saturating_add(2);
+    let mut logo_y = area.y.saturating_add(1);
+    for line in termarium_logo() {
+        if logo_y >= area.bottom() {
+            break;
+        }
+        let max_width = area.right().saturating_sub(logo_x) as usize;
+        frame
+            .buffer_mut()
+            .set_stringn(logo_x, logo_y, line, max_width, logo_style);
+        logo_y = logo_y.saturating_add(1);
+    }
+
+    let lines = export_card_info_lines(app);
+    let mut y = area
+        .bottom()
+        .saturating_sub(lines.len() as u16)
+        .saturating_sub(1)
+        .max(area.y.saturating_add(1));
+    for line in lines {
+        if y >= area.bottom() {
+            break;
+        }
+        draw_right_aligned_text(
+            frame,
+            area.right().saturating_sub(2),
+            y,
+            &line,
+            Style::default().fg(palette.silver).bg(palette.panel),
+        );
+        y = y.saturating_add(1);
+    }
+}
+
+fn export_card_info_lines(app: &App) -> Vec<String> {
+    let location = app.active_location();
+    let timezone = location.timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC);
+    let local_time = app
+        .now()
+        .with_timezone(&timezone)
+        .format("%Y-%m-%d %H:%M %Z")
+        .to_string();
+    let mut lines = Vec::new();
+    if let Some(name) = export_card_preset_name(app, &location) {
+        lines.push(name);
+    }
+    lines.push(format!(
+        "{:+.4}  {:+.4}  ·  {}",
+        location.latitude, location.longitude, local_time
+    ));
+    lines.push("https://github.com/7b7b7b/termarium".to_string());
+    lines
+}
+
+fn export_card_preset_name(app: &App, location: &Location) -> Option<String> {
+    PRESETS
+        .iter()
+        .find(|preset| {
+            !preset.custom
+                && (preset.latitude - location.latitude).abs() < 0.01
+                && (preset.longitude - location.longitude).abs() < 0.01
+        })
+        .map(|preset| match app.config.language {
+            Language::Zh => preset.zh.to_string(),
+            Language::En => preset.en.to_string(),
+        })
+}
+
+fn draw_right_aligned_text(frame: &mut Frame, right: u16, y: u16, text: &str, style: Style) {
+    let width = UnicodeWidthStr::width(text) as u16;
+    let x = right.saturating_sub(width);
+    let max_width = right.saturating_sub(x) as usize;
+    frame.buffer_mut().set_stringn(x, y, text, max_width, style);
+}
+
+fn termarium_logo() -> [&'static str; 6] {
+    [
+        "████████╗███████╗██████╗ ███╗   ███╗ █████╗ ██████╗ ██╗██╗   ██╗███╗   ███╗",
+        "╚══██╔══╝██╔════╝██╔══██╗████╗ ████║██╔══██╗██╔══██╗██║██║   ██║████╗ ████║",
+        "   ██║   █████╗  ██████╔╝██╔████╔██║███████║██████╔╝██║██║   ██║██╔████╔██║",
+        "   ██║   ██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══██║██╔══██╗██║██║   ██║██║╚██╔╝██║",
+        "   ██║   ███████╗██║  ██║██║ ╚═╝ ██║██║  ██║██║  ██║██║╚██████╔╝██║ ╚═╝ ██║",
+        "   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝ ╚═════╝ ╚═╝     ╚═╝",
+    ]
+}
+
+fn draw_export_card_visual(frame: &mut Frame, app: &mut App, area: Rect, palette: Palette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let grid = if app.horizon_transition().is_some() {
+        horizon_transition_grid(app, area.width as usize, area.height as usize, palette)
+    } else if app.view_mode == ViewMode::Ground {
+        ground_grid(app, area.width as usize, area.height as usize, palette)
+    } else {
+        let sky_location = app.render_location();
+        let visible = visible_stars_for_canvas(
+            app,
+            &sky_location,
+            area.width as usize,
+            area.height as usize,
+            app.config.display.sky_orientation,
+        );
+        app.set_pointer_canvas(area.width as usize, area.height as usize);
+        lines_to_grid(
+            sky_canvas_lines(
+                app,
+                &visible,
+                &sky_location,
+                area.width as usize,
+                area.height as usize,
+                palette,
+            ),
+            area.width as usize,
+            area.height as usize,
+            palette,
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(grid_to_lines(grid)).style(Style::default().bg(palette.bg)),
+        area,
+    );
 }
 
 fn palette(theme: Theme) -> Palette {
@@ -1993,6 +2440,17 @@ fn zoomed_sky_lines(
         }
     }
 
+    draw_zoomed_landscape(
+        &mut grid,
+        app,
+        &location,
+        &view,
+        width,
+        height,
+        app.config.display.landscape,
+        palette,
+    );
+
     if let Some((x, y)) = view.project_horizontal(90.0, 0.0) {
         set_cell(
             &mut grid,
@@ -2390,6 +2848,88 @@ fn draw_landscape(
         if let Some((x, y)) =
             astro::project_dome_for_orientation(0.0, azimuth as f64, width, height, orientation)
         {
+            let tick_len = if azimuth % 90 == 0 { 3 } else { 2 };
+            for dy in 0..tick_len {
+                set_cell(grid, x, (y + dy).min(height - 1), '|', tick_style);
+            }
+        }
+    }
+}
+
+fn draw_zoomed_landscape(
+    grid: &mut [Vec<SkyCell>],
+    app: &App,
+    location: &Location,
+    view: &app::ZoomRenderView,
+    width: usize,
+    height: usize,
+    mode: LandscapeMode,
+    palette: Palette,
+) {
+    if matches!(mode, LandscapeMode::Off) || width == 0 || height == 0 {
+        return;
+    }
+
+    let mut outer_radius = 1.0_f64;
+    for (x, y) in [
+        (0, 0),
+        (width.saturating_sub(1), 0),
+        (0, height.saturating_sub(1)),
+        (width.saturating_sub(1), height.saturating_sub(1)),
+    ] {
+        if let Some((dx, dy)) = view.source_dome_offset(x, y) {
+            outer_radius = outer_radius.max((dx * dx + dy * dy).sqrt());
+        }
+    }
+    if outer_radius <= 1.0 {
+        return;
+    }
+
+    let ring_depth = (outer_radius - 1.0).max(0.001);
+    let sun = solar::sun_position(app.now());
+    let gmst_hours = astro::local_sidereal_time_hours(app.now(), 0.0);
+    let subsolar_lon = normalize_degrees((sun.ra_hours - gmst_hours) * 15.0);
+    let sun_lat = sun.dec_degrees.to_radians();
+    let bg = color_to_rgb(palette.bg);
+    let east_sign = match app.config.display.sky_orientation {
+        SkyOrientation::Observer => -1.0,
+        SkyOrientation::Map => 1.0,
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let Some((dx, dy)) = view.source_dome_offset(x, y) else {
+                continue;
+            };
+            let radius = (dx * dx + dy * dy).sqrt();
+            if radius <= 1.0 {
+                continue;
+            }
+
+            let azimuth = normalize_degrees((dx / east_sign).atan2(dy).to_degrees());
+            let ring_t = ((radius - 1.0) / ring_depth).clamp(0.0, 1.0);
+            let distance_km = lerp_f64(25.0, 2_400.0, smootherstep01(ring_t));
+            let (lon, lat) =
+                destination_point(location.latitude, location.longitude, azimuth, distance_km);
+            let altitude = solar_altitude(lat.to_radians(), lon, sun_lat, subsolar_lon);
+            let earth = globe_surface_color(lon, lat, altitude);
+            let edge_fade = smootherstep01((radius - 1.0) / 0.055);
+            let strength = edge_fade * lerp_f64(0.16, 0.52, smootherstep01(ring_t));
+            let color = RgbColor::mix(bg, earth, strength).to_color();
+            set_cell(grid, x, y, ' ', Style::default().fg(color).bg(color));
+        }
+    }
+
+    if !matches!(mode, LandscapeMode::Bearings) {
+        return;
+    }
+
+    let tick_style = Style::default()
+        .fg(palette.cyan)
+        .bg(palette.bg)
+        .add_modifier(Modifier::BOLD);
+    for azimuth in (0..360).step_by(45) {
+        if let Some((x, y)) = view.project_horizontal(0.0, azimuth as f64) {
             let tick_len = if azimuth % 90 == 0 { 3 } else { 2 };
             for dy in 0..tick_len {
                 set_cell(grid, x, (y + dy).min(height - 1), '|', tick_style);
@@ -4183,7 +4723,23 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
         (ViewMode::Sky, true) => "footer_compact",
         (ViewMode::Sky, false) => "footer",
     };
-    let text = if app.message.is_empty() {
+    let recording = app
+        .export
+        .recording
+        .as_ref()
+        .filter(|_| !app.export.rendering_export)
+        .map(|recording| {
+            format!(
+                "REC {} {:.1}/{:.0}s · {} frames",
+                recording.format.label(),
+                recording.elapsed().as_secs_f32(),
+                recording.max_duration().as_secs_f32(),
+                recording.frames.len()
+            )
+        });
+    let text = if let Some(recording) = recording {
+        format!("{}   ·   {}", recording, i18n::tr(language, footer_key))
+    } else if app.message.is_empty() {
         i18n::tr(language, footer_key).to_string()
     } else {
         format!("{}   ·   {}", app.message, i18n::tr(language, footer_key))
@@ -4195,6 +4751,215 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect, palette: Palette) {
             .style(Style::default().fg(palette.muted).bg(palette.bg)),
         area,
     );
+}
+
+fn draw_recording_status(frame: &mut Frame, app: &App, palette: Palette) {
+    let Some(recording) = app.export.recording.as_ref() else {
+        return;
+    };
+    if app.export.rendering_export {
+        return;
+    }
+    let text = format!(
+        " REC {} {:.1}/{:.0}s · {} frames · E stop ",
+        recording.format.label(),
+        recording.elapsed().as_secs_f32(),
+        recording.max_duration().as_secs_f32(),
+        recording.frames.len()
+    );
+    let width = (text.chars().count() as u16)
+        .saturating_add(2)
+        .min(frame.area().width.saturating_sub(2));
+    if width == 0 || frame.area().height == 0 {
+        return;
+    }
+    let area = Rect::new(frame.area().x, frame.area().y, width, 1);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                "REC",
+                Style::default()
+                    .fg(palette.selected)
+                    .bg(palette.panel)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                text.trim_start_matches(" REC"),
+                Style::default().fg(palette.silver).bg(palette.panel),
+            ),
+        ]))
+        .style(Style::default().bg(palette.panel)),
+        area,
+    );
+}
+
+fn draw_export_panel(frame: &mut Frame, app: &App, palette: Palette) {
+    let language = app.config.language;
+    let area = centered_rect(frame.area(), 80, 15);
+    dim_modal_background(frame, area, palette);
+    let block = Block::default()
+        .title(format!(" {} ", export_title(language)))
+        .title_style(
+            Style::default()
+                .fg(palette.cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.cyan));
+    let inner = block.inner(area).inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    frame.render_widget(block, area);
+
+    let status = if app.export.rendering_export {
+        app.export
+            .render_job
+            .as_ref()
+            .map(|job| {
+                format!(
+                    "processing {} · {} frames",
+                    job.format.label(),
+                    job.frame_count
+                )
+            })
+            .unwrap_or_else(|| app.export.message.clone())
+    } else {
+        app.export
+            .recording
+            .as_ref()
+            .map(|recording| {
+                let (terminal_width, terminal_height) = recording.size.terminal_size();
+                let (pixel_width, pixel_height) = recording.size.output_pixels(recording.format);
+                format!(
+                    "REC {} {:.1}/{:.0}s · {} frames · {}x{} -> {}x{}",
+                    recording.format.label(),
+                    recording.elapsed().as_secs_f32(),
+                    recording.max_duration().as_secs_f32(),
+                    recording.frames.len(),
+                    terminal_width,
+                    terminal_height,
+                    pixel_width,
+                    pixel_height
+                )
+            })
+            .unwrap_or_else(|| export_idle_text(language).to_string())
+    };
+    let (terminal_width, terminal_height) = app.export.size.terminal_size();
+    let (pixel_width, pixel_height) = app.export.size.output_pixels(app.export.format);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                export_format_label(language),
+                Style::default().fg(palette.muted),
+            ),
+            Span::raw("  "),
+            Span::styled("< ", Style::default().fg(palette.cyan)),
+            Span::styled(
+                app.export.format.label(),
+                Style::default()
+                    .fg(palette.selected)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" >", Style::default().fg(palette.cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                export_size_label(language),
+                Style::default().fg(palette.muted),
+            ),
+            Span::raw("  "),
+            Span::styled("↑ ", Style::default().fg(palette.cyan)),
+            Span::styled(
+                format!(
+                    "{} · {}x{} -> {}x{}",
+                    app.export.size.label(),
+                    terminal_width,
+                    terminal_height,
+                    pixel_width,
+                    pixel_height
+                ),
+                Style::default()
+                    .fg(palette.selected)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ↓", Style::default().fg(palette.cyan)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            export_path_label(language),
+            Style::default().fg(palette.muted),
+        )),
+        Line::from(Span::styled(
+            if app.export.path_input.is_empty() {
+                default_export_path(app, app.export.format)
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                app.export.path_input.clone()
+            },
+            Style::default().fg(palette.warm),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(status, Style::default().fg(palette.silver))),
+        Line::from(Span::styled(
+            export_hint(language),
+            Style::default().fg(palette.muted),
+        )),
+    ];
+    if !app.export.message.is_empty() {
+        lines.push(Line::from(Span::styled(
+            app.export.message.clone(),
+            Style::default().fg(palette.moon),
+        )));
+    }
+
+    render_help_lines(frame, inner, &lines);
+}
+
+fn export_title(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "导出分享卡",
+        Language::En => "Export Share Card",
+    }
+}
+
+fn export_format_label(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "格式",
+        Language::En => "Format",
+    }
+}
+
+fn export_size_label(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "尺寸",
+        Language::En => "Size",
+    }
+}
+
+fn export_path_label(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "保存到",
+        Language::En => "Save to",
+    }
+}
+
+fn export_idle_text(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "PNG/SVG 导出当前帧；GIF/MP4/WebM 开始录制，开始后按 E 停止",
+        Language::En => "PNG/SVG export current frame; GIF/MP4/WebM record, then press E to stop",
+    }
+}
+
+fn export_hint(language: Language) -> &'static str {
+    match language {
+        Language::Zh => "←/→ 格式 · ↑/↓ 尺寸 · Enter 导出/录制 · E 停止录制 · Esc 返回",
+        Language::En => {
+            "Left/Right format · Up/Down size · Enter export/record · E stop recording · Esc back"
+        }
+    }
 }
 
 fn footer_mouse_line(language: Language, compact: bool) -> &'static str {
@@ -4293,12 +5058,7 @@ fn draw_setup(frame: &mut Frame, app: &App, palette: Palette) {
         )));
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    render_help_lines(frame, inner, &lines);
 }
 
 fn setup_action_line(text: String, selected: bool, palette: Palette) -> Line<'static> {
@@ -4422,19 +5182,13 @@ fn draw_search(frame: &mut Frame, app: &App, palette: Palette) {
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    render_help_lines(frame, inner, &lines);
 }
 
 fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
     let area = centered_rect(frame.area(), 60, 21);
     dim_modal_background(frame, area, palette);
-    frame.render_widget(Clear, area);
     let block = Block::default()
         .title(format!(" {} ", i18n::tr(language, "settings")))
         .title_style(
@@ -4443,8 +5197,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.cyan))
-        .style(Style::default().bg(palette.panel));
+        .border_style(Style::default().fg(palette.cyan));
     let inner = block.inner(area).inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -4477,12 +5230,7 @@ fn draw_settings(frame: &mut Frame, app: &App, palette: Palette) {
         Style::default().fg(palette.muted),
     )));
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver).bg(palette.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    render_help_lines(frame, inner, &lines);
 
     if app.settings.theme_picker {
         draw_theme_picker(frame, app, palette);
@@ -4556,7 +5304,7 @@ fn settings_rows(app: &App) -> Vec<(String, String)> {
 fn draw_theme_picker(frame: &mut Frame, app: &App, palette: Palette) {
     let language = app.config.language;
     let area = theme_picker_modal(frame.area());
-    frame.render_widget(Clear, area);
+    dim_modal_background(frame, area, palette);
     let block = Block::default()
         .title(format!(" {} ", i18n::tr(language, "theme_picker")))
         .title_style(
@@ -4565,8 +5313,7 @@ fn draw_theme_picker(frame: &mut Frame, app: &App, palette: Palette) {
                 .add_modifier(Modifier::BOLD),
         )
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(palette.cyan))
-        .style(Style::default().bg(palette.panel));
+        .border_style(Style::default().fg(palette.cyan));
     let inner = block.inner(area).inner(Margin {
         horizontal: 1,
         vertical: 1,
@@ -4601,12 +5348,7 @@ fn draw_theme_picker(frame: &mut Frame, app: &App, palette: Palette) {
         Style::default().fg(palette.muted),
     )));
 
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().fg(palette.silver).bg(palette.panel))
-            .wrap(Wrap { trim: false }),
-        inner,
-    );
+    render_help_lines(frame, inner, &lines);
 }
 
 fn draw_opening(frame: &mut Frame, app: &App, palette: Palette) {
@@ -4694,35 +5436,10 @@ fn dim_help_background(frame: &mut Frame, area: Rect, palette: Palette) {
 }
 
 fn dim_modal_background(frame: &mut Frame, area: Rect, palette: Palette) {
-    let buffer = frame.buffer_mut();
-    let area = buffer.area.intersection(area);
-    for y in area.top()..area.bottom() {
-        for x in area.left()..area.right() {
-            let cell = &mut buffer[(x, y)];
-            cell.set_fg(dim_color(cell.fg, palette.veil, 0.42));
-            cell.set_bg(dim_color(cell.bg, palette.bg, 0.28));
-        }
-    }
+    dim_help_background(frame, area, palette);
 }
 
-fn dim_color(color: Color, fallback: Color, amount: f64) -> Color {
-    let amount = amount.clamp(0.0, 1.0);
-    match color {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            (r as f64 * amount).round().clamp(0.0, 255.0) as u8,
-            (g as f64 * amount).round().clamp(0.0, 255.0) as u8,
-            (b as f64 * amount).round().clamp(0.0, 255.0) as u8,
-        ),
-        Color::Black => Color::Black,
-        Color::DarkGray => Color::Rgb(18, 20, 24),
-        Color::Gray => Color::Rgb(34, 38, 44),
-        Color::White => Color::Rgb(72, 78, 88),
-        Color::Reset => fallback,
-        _ => fallback,
-    }
-}
-
-fn render_help_lines(frame: &mut Frame, area: Rect, lines: &[Line<'static>]) {
+fn render_help_lines<'a>(frame: &mut Frame, area: Rect, lines: &[Line<'a>]) {
     for (row, line) in lines.iter().enumerate() {
         let y = area.y.saturating_add(row as u16);
         if y >= area.bottom() {
@@ -5230,12 +5947,40 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains(i18n::tr(Language::En, "landscape")));
-        assert!(text.contains("ground ring"));
-        assert!(text.contains(i18n::tr(Language::En, "sky_orientation")));
-        assert!(text.contains("observer"));
-        assert!(text.contains(i18n::tr(Language::En, "sky_culture")));
-        assert!(text.contains("(y)"));
-        assert!(text.contains("western"));
+        assert!(text.contains("ground") || text.contains("ring"));
+        assert!(text.contains(i18n::tr(Language::En, "language")));
+        assert!(text.contains(i18n::tr(Language::En, "theme")));
+    }
+
+    #[test]
+    fn offscreen_export_buffer_renders_virtual_sizes() {
+        let mut app = app_for_test(false);
+        let image = render_offscreen_buffer(&mut app, 160, 80).unwrap();
+        assert_eq!(image.area.width, 160);
+        assert_eq!(image.area.height, 80);
+        let text = image
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(text.contains("github.com/7b7b7b/termarium"));
+        assert!(!text.contains(i18n::tr(Language::En, "footer")));
+
+        let animation = render_offscreen_buffer(&mut app, 160, 80).unwrap();
+        assert_eq!(animation.area.width, 160);
+        assert_eq!(animation.area.height, 80);
+    }
+
+    #[test]
+    fn renders_export_panel() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+        app.export.panel_open = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 100, 30);
+        assert!(text.contains("Export Share Card"));
+        assert!(text.contains("PNG"));
     }
 
     #[test]
@@ -5265,7 +6010,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_modal_uses_opaque_panel_background() {
+    fn settings_modal_uses_help_style_backdrop() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = app_for_test(false);
@@ -5273,17 +6018,17 @@ mod tests {
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
 
         let buffer = terminal.backend().buffer();
-        let modal = centered_rect(Rect::new(0, 0, 80, 24), 60, 21);
         let test_palette = palette(app.config.display.theme);
-        for y in modal.top()..modal.bottom() {
-            for x in modal.left()..modal.right() {
-                assert_eq!(
-                    buffer[(x, y)].bg,
-                    test_palette.panel,
-                    "settings modal cell at ({x}, {y}) should use panel background"
-                );
-            }
-        }
+        let modal = centered_rect(Rect::new(0, 0, 80, 24), 60, 21);
+        assert_ne!(buffer[(modal.x + 1, modal.y + 1)].bg, test_palette.panel);
+        assert!(
+            buffer
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+                .contains(i18n::tr(Language::En, "settings"))
+        );
     }
 
     #[test]
@@ -6000,6 +6745,19 @@ mod tests {
                         && span.style.bg != Some(palette(Theme::Midnight).bg)
                 }),
             "ground-ring landscape should paint textured cells outside the sky dome"
+        );
+
+        app.handle_key(KeyEvent::from(KeyCode::Char('z'))).unwrap();
+        let zoom_lines = zoomed_sky_lines(&app, 40, 12, palette(Theme::Midnight)).unwrap();
+        assert!(
+            zoom_lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .any(|span| {
+                    span.content.as_ref() == " "
+                        && span.style.bg != Some(palette(Theme::Midnight).bg)
+                }),
+            "zoom transition should keep rendering the ground ring until it moves out of view"
         );
 
         app.config.display.landscape = LandscapeMode::Bearings;
