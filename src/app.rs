@@ -15,7 +15,7 @@ use crate::{
     constellations::{self, ConstellationLine},
     deep_sky::{self, DeepSkyObject},
     export::ExportState,
-    i18n, planets, star_aliases,
+    i18n, iss, planets, star_aliases,
 };
 
 const POINTER_FAST_STEP: isize = 2;
@@ -486,6 +486,14 @@ pub const PRESETS: &[Preset] = &[
         custom: false,
     },
     Preset {
+        en: "ISS",
+        zh: "国际空间站",
+        latitude: 0.0,
+        longitude: 0.0,
+        timezone: "UTC",
+        custom: false,
+    },
+    Preset {
         en: "Custom",
         zh: "自定义",
         latitude: 0.0,
@@ -518,9 +526,7 @@ impl SetupState {
         let preset_index = PRESETS
             .iter()
             .position(|preset| {
-                !preset.custom
-                    && (preset.latitude - location.latitude).abs() < 0.0001
-                    && (preset.longitude - location.longitude).abs() < 0.0001
+                !preset.custom && preset_matches_location_for_setup(preset, location)
             })
             .unwrap_or(PRESETS.len() - 1);
         Self {
@@ -726,6 +732,7 @@ pub struct App {
     pub search: SearchState,
     pub pointer: PointerState,
     pub ground: GroundState,
+    pub iss_location: Location,
     pub export: ExportState,
     pub session_location: Option<Location>,
     pub selected_target: Option<Target>,
@@ -770,6 +777,7 @@ impl App {
         let setup = SetupState::from_location(&config.location);
         let ground = GroundState::from_location(&config.location);
         let time_base = time_override.unwrap_or_else(Utc::now);
+        let iss_location = iss_location_at(time_base);
         let language = config.language;
         let screen = if start_setup {
             Screen::Search
@@ -800,6 +808,7 @@ impl App {
             search,
             pointer: PointerState::default(),
             ground,
+            iss_location,
             export: ExportState::default(),
             session_location: None,
             selected_target: None,
@@ -843,7 +852,19 @@ impl App {
         }
     }
 
+    fn location_for_preset(&self, preset: Preset) -> Location {
+        location_for_preset_at(preset, self.now())
+    }
+
+    fn sync_iss_location(&mut self) {
+        self.iss_location = self.iss_location();
+        if self.view_mode == ViewMode::Ground && is_iss_location(&self.ground.preview_location) {
+            self.ground = GroundState::from_location(&self.iss_location);
+        }
+    }
+
     pub fn tick(&mut self) {
+        self.sync_iss_location();
         if self.config.display.animations {
             self.animation_tick = self.animation_tick.wrapping_add(1);
             self.opening_ticks = self.opening_ticks.saturating_sub(1);
@@ -1394,10 +1415,11 @@ impl App {
     fn apply_setup_preset(&mut self) {
         let preset = PRESETS[self.setup.preset_index];
         if !preset.custom {
-            self.setup.name = preset.en.to_string();
-            self.setup.latitude = format!("{:.4}", preset.latitude);
-            self.setup.longitude = format!("{:.4}", preset.longitude);
-            self.setup.timezone = preset.timezone.to_string();
+            let location = self.location_for_preset(preset);
+            self.setup.name = location.name;
+            self.setup.latitude = format!("{:.4}", location.latitude);
+            self.setup.longitude = format!("{:.4}", location.longitude);
+            self.setup.timezone = location.timezone;
         }
     }
 
@@ -1469,7 +1491,10 @@ impl App {
     fn apply_preset(&mut self, index: usize, persist: bool) -> io::Result<()> {
         let preset = PRESETS[index];
         let from_location = self.config.location.clone();
-        let to_location = location_for_preset(preset);
+        let to_location = self.location_for_preset(preset);
+        if is_iss_location(&to_location) {
+            self.iss_location = to_location.clone();
+        }
         let hidden_zoom_code = self
             .constellation_zoom
             .then(|| self.selected_constellation_code().map(ToString::to_string))
@@ -1502,7 +1527,10 @@ impl App {
         let Some(preset) = PRESETS.get(index).copied().filter(|preset| !preset.custom) else {
             return Ok(());
         };
-        let location = location_for_preset(preset);
+        let location = self.location_for_preset(preset);
+        if is_iss_location(&location) {
+            self.iss_location = location.clone();
+        }
         let first_location_pick = !self.can_cancel_setup;
         let animate_from = (self.config.display.animations
             && self.view_mode == ViewMode::Ground
@@ -1807,11 +1835,30 @@ impl App {
 
     pub fn active_location(&self) -> &Location {
         if self.view_mode == ViewMode::Ground {
+            if is_iss_location(&self.ground.preview_location) {
+                return &self.iss_location;
+            }
             return &self.ground.preview_location;
         }
-        self.session_location
-            .as_ref()
-            .unwrap_or(&self.config.location)
+        if let Some(location) = self.session_location.as_ref() {
+            if is_iss_location(location) {
+                &self.iss_location
+            } else {
+                location
+            }
+        } else if is_iss_location(&self.config.location) {
+            &self.iss_location
+        } else {
+            &self.config.location
+        }
+    }
+
+    pub fn iss_position(&self) -> iss::IssPosition {
+        iss::position(self.now())
+    }
+
+    pub fn iss_location(&self) -> Location {
+        iss_location_at(self.now())
     }
 
     pub fn render_location(&self) -> Location {
@@ -2040,6 +2087,7 @@ impl App {
 
     pub(crate) fn toggle_ground_sky(&mut self) {
         let from = self.view_mode;
+
         match self.view_mode {
             ViewMode::Sky => {
                 if self.config.display.animations && self.constellation_zoom {
@@ -3049,13 +3097,42 @@ fn map_preview_location(latitude: f64, longitude: f64) -> Location {
     }
 }
 
-fn location_for_preset(preset: Preset) -> Location {
+fn iss_location_at(time: DateTime<Utc>) -> Location {
+    let position = iss::position(time);
+    Location {
+        name: "ISS".to_string(),
+        latitude: position.latitude,
+        longitude: position.longitude,
+        timezone: "UTC".to_string(),
+    }
+}
+
+fn is_iss_preset(preset: Preset) -> bool {
+    preset.en == "ISS"
+}
+
+fn is_iss_location(location: &Location) -> bool {
+    location.name.eq_ignore_ascii_case("ISS")
+}
+
+fn location_for_preset_at(preset: Preset, time: DateTime<Utc>) -> Location {
+    if is_iss_preset(preset) {
+        return iss_location_at(time);
+    }
     Location {
         name: preset.en.to_string(),
         latitude: preset.latitude,
         longitude: preset.longitude,
         timezone: preset.timezone.to_string(),
     }
+}
+
+fn preset_matches_location_for_setup(preset: &Preset, location: &Location) -> bool {
+    if is_iss_preset(*preset) || is_iss_location(location) {
+        return is_iss_preset(*preset) && is_iss_location(location);
+    }
+    (preset.latitude - location.latitude).abs() < 0.0001
+        && (preset.longitude - location.longitude).abs() < 0.0001
 }
 
 fn approximate_timezone(longitude: f64) -> String {
@@ -3112,10 +3189,14 @@ fn city_search_results(query: &str, language: Language) -> Vec<SearchResult> {
             };
             SearchResult {
                 label,
-                detail: format!(
-                    "{} · {:+.4} {:+.4} · {}",
-                    preset.en, preset.latitude, preset.longitude, preset.timezone
-                ),
+                detail: if is_iss_preset(*preset) {
+                    format!("{} · low Earth orbit · {}", preset.en, preset.timezone)
+                } else {
+                    format!(
+                        "{} · {:+.4} {:+.4} · {}",
+                        preset.en, preset.latitude, preset.longitude, preset.timezone
+                    )
+                },
                 target: Target::City(index),
             }
         })
@@ -3130,11 +3211,9 @@ fn preset_display_name(preset: Preset, language: Language) -> &'static str {
 }
 
 fn current_preset_index(location: &Location) -> Option<usize> {
-    PRESETS.iter().position(|preset| {
-        !preset.custom
-            && (preset.latitude - location.latitude).abs() < 0.0001
-            && (preset.longitude - location.longitude).abs() < 0.0001
-    })
+    PRESETS
+        .iter()
+        .position(|preset| !preset.custom && preset_matches_location_for_setup(preset, location))
 }
 
 fn next_position(current: Option<usize>, len: usize, forward: bool) -> usize {
@@ -3308,6 +3387,44 @@ mod tests {
             app.horizon_transition(),
             Some((ViewMode::Ground, ViewMode::Sky, _))
         ));
+    }
+
+    #[test]
+    fn iss_is_searchable_city_observer_with_dynamic_position() {
+        let base = Utc.with_ymd_and_hms(2026, 5, 7, 12, 0, 0).unwrap();
+        let mut app = test_app(Location {
+            name: "Shanghai".to_string(),
+            latitude: 31.2304,
+            longitude: 121.4737,
+            timezone: "Asia/Shanghai".to_string(),
+        });
+        app.time_base = base;
+        app.paused = true;
+        app.config.display.animations = false;
+
+        let iss_index = city_search_results("iss", Language::En)
+            .into_iter()
+            .find_map(|result| match result.target {
+                Target::City(index) if result.label == "ISS" => Some(index),
+                _ => None,
+            })
+            .expect("ISS should be searchable as a city preset");
+
+        app.apply_preset(iss_index, false).unwrap();
+
+        assert_eq!(app.config.location.name, "ISS");
+        assert_eq!(app.config.location.timezone, "UTC");
+        let iss = app.iss_position();
+        let rendered = app.render_location();
+        assert_eq!(rendered.name, "ISS");
+        assert!((rendered.latitude - iss.latitude).abs() < 0.001);
+        assert!((rendered.longitude - iss.longitude).abs() < 0.001);
+
+        app.time_base = base + Duration::minutes(10);
+        app.tick();
+        let moved = app.render_location();
+        assert!((moved.latitude - rendered.latitude).abs() > 1.0);
+        assert!((moved.longitude - rendered.longitude).abs() > 1.0);
     }
 
     #[test]

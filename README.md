@@ -31,6 +31,7 @@ Linux x64, and Windows x64.
 - Time travel, city tour, alias-aware target search, constellation highlight, and tonight panel
 - Crosshair pointer mode for selecting visible stars directly from the sky map
 - Globe view with offline Blue Marble terrain colors, daylight shading, city labels, rotating preview, and horizon flip animation
+- ISS is available as a dynamic low Earth orbit observer in the city/location picker
 - Optional horizon and bearing-oriented ground landscape modes
 - Configurable sky orientation: observer view defaults to east on the left and west on the right, with a map-style option
 - Offline low-precision Venus, Mars, Jupiter, and Saturn positions
@@ -69,8 +70,11 @@ o       settings panel
 
 In the globe view, arrow keys rotate to a temporary observing point. `/` searches
 the built-in city list, and visible city names are decluttered so dense regions
-stay readable. The preview is used when you flip back to the sky, but it is not
-saved unless you open setup from that preview and confirm it.
+stay readable. The city picker also includes ISS. Choosing it uses the station's
+current approximate ground track as the observer for the sky map; it behaves
+like a normal location choice, without a separate ISS viewing mode. The preview
+is used when you flip back to the sky, but it is not saved unless you open setup
+from that preview and confirm it.
 
 Quick toggles still work, but they are also available in the settings panel:
 
@@ -128,8 +132,9 @@ deep-sky catalog is derived from OpenNGC v20260501 and remains under CC BY-SA
 4.0. See `NOTICE` for attribution. The bundled world coastline and land data is
 derived from Natural Earth 1:110m public domain vector data, and the bundled
 globe color texture is downsampled from NASA Blue Marble Next Generation July
-2004 topography and bathymetry imagery. Planet and solar calculations are local
-approximate algorithms based on NASA/JPL and NOAA public reference formulas.
+2004 topography and bathymetry imagery. Planet, solar, and ISS ground-track
+calculations are local approximate algorithms based on compact public reference
+formulae and nominal orbital constants.
 
 ## Development
 

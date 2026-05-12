@@ -804,15 +804,19 @@ fn export_card_info_lines(app: &App) -> Vec<String> {
 fn export_card_preset_name(app: &App, location: &Location) -> Option<String> {
     PRESETS
         .iter()
-        .find(|preset| {
-            !preset.custom
-                && (preset.latitude - location.latitude).abs() < 0.01
-                && (preset.longitude - location.longitude).abs() < 0.01
-        })
+        .find(|preset| !preset.custom && preset_matches_location_for_export(preset, location))
         .map(|preset| match app.config.language {
             Language::Zh => preset.zh.to_string(),
             Language::En => preset.en.to_string(),
         })
+}
+
+fn preset_matches_location_for_export(preset: &app::Preset, location: &Location) -> bool {
+    if preset.en == "ISS" || location.name.eq_ignore_ascii_case("ISS") {
+        return preset.en == "ISS" && location.name.eq_ignore_ascii_case("ISS");
+    }
+    (preset.latitude - location.latitude).abs() < 0.01
+        && (preset.longitude - location.longitude).abs() < 0.01
 }
 
 fn draw_right_aligned_text(frame: &mut Frame, right: u16, y: u16, text: &str, style: Style) {
@@ -1278,8 +1282,9 @@ fn draw_horizon_canvas(frame: &mut Frame, app: &App, area: Rect, palette: Palett
 }
 
 fn sky_title_line(language: Language, palette: Palette) -> Line<'static> {
+    let title = i18n::tr(language, "sky");
     Line::from(Span::styled(
-        format!(" {} ", i18n::tr(language, "sky")),
+        format!(" {title} "),
         Style::default()
             .fg(palette.cyan)
             .add_modifier(Modifier::BOLD),
@@ -1287,8 +1292,9 @@ fn sky_title_line(language: Language, palette: Palette) -> Line<'static> {
 }
 
 fn ground_title_line(language: Language, palette: Palette) -> Line<'static> {
+    let title = i18n::tr(language, "ground");
     Line::from(Span::styled(
-        format!(" {} ", i18n::tr(language, "ground")),
+        format!(" {title} "),
         Style::default()
             .fg(palette.cyan)
             .add_modifier(Modifier::BOLD),
@@ -1929,10 +1935,9 @@ fn draw_globe_markers(
     unicode: bool,
 ) {
     let saved = &app.config.location;
-    if (saved.latitude - app.ground.preview_location.latitude).abs() > 0.0001
-        || (saved.longitude - app.ground.preview_location.longitude).abs() > 0.0001
-    {
-        if let Some((x, y)) = globe.project(saved.longitude, saved.latitude) {
+    let (saved_lon, saved_lat) = location_marker_position(app, saved);
+    if locations_differ_for_marker(saved, &app.ground.preview_location) {
+        if let Some((x, y)) = globe.project(saved_lon, saved_lat) {
             let style = Style::default().fg(palette.warm);
             set_cell_overlay(grid, x, y, '+', style);
             let label = location_display_label(saved, app.config.language, unicode);
@@ -1974,9 +1979,8 @@ fn draw_preset_city_markers(
         .iter()
         .filter(|preset| !preset.custom)
         .filter_map(|preset| {
-            globe
-                .project(preset.longitude, preset.latitude)
-                .map(|(x, y)| (preset, x, y))
+            let (lon, lat) = preset_marker_position(app, preset);
+            globe.project(lon, lat).map(|(x, y)| (preset, x, y))
         })
         .collect::<Vec<_>>();
 
@@ -2024,8 +2028,9 @@ fn ground_city_hit(app: &App, width: usize, height: usize, x: usize, y: usize) -
         .enumerate()
         .filter(|(_, preset)| !preset.custom)
         .filter_map(|(index, preset)| {
+            let (lon, lat) = preset_marker_position(app, preset);
             globe
-                .project(preset.longitude, preset.latitude)
+                .project(lon, lat)
                 .map(|(marker_x, marker_y)| (index, preset, marker_x, marker_y))
         })
         .collect::<Vec<_>>();
@@ -2088,9 +2093,9 @@ fn reserve_globe_focus_labels(
     unicode: bool,
 ) {
     let saved = &app.config.location;
-    if ((saved.latitude - app.ground.preview_location.latitude).abs() > 0.0001
-        || (saved.longitude - app.ground.preview_location.longitude).abs() > 0.0001)
-        && let Some((x, y)) = globe.project(saved.longitude, saved.latitude)
+    let (saved_lon, saved_lat) = location_marker_position(app, saved);
+    if locations_differ_for_marker(saved, &app.ground.preview_location)
+        && let Some((x, y)) = globe.project(saved_lon, saved_lat)
     {
         reserve_marker_cells(occupied, x, y, 1);
         let label = location_display_label(saved, app.config.language, unicode);
@@ -2206,6 +2211,40 @@ fn preset_city_label(preset: &app::Preset, language: Language, unicode: bool) ->
     }
 }
 
+fn is_iss_preset(preset: &app::Preset) -> bool {
+    preset.en == "ISS"
+}
+
+fn is_iss_location(location: &Location) -> bool {
+    location.name.eq_ignore_ascii_case("ISS")
+}
+
+fn preset_marker_position(app: &App, preset: &app::Preset) -> (f64, f64) {
+    if is_iss_preset(preset) {
+        let position = app.iss_position();
+        (position.longitude, position.latitude)
+    } else {
+        (preset.longitude, preset.latitude)
+    }
+}
+
+fn location_marker_position(app: &App, location: &Location) -> (f64, f64) {
+    if is_iss_location(location) {
+        let position = app.iss_position();
+        (position.longitude, position.latitude)
+    } else {
+        (location.longitude, location.latitude)
+    }
+}
+
+fn locations_differ_for_marker(left: &Location, right: &Location) -> bool {
+    if is_iss_location(left) || is_iss_location(right) {
+        return !(is_iss_location(left) && is_iss_location(right));
+    }
+    (left.latitude - right.latitude).abs() > 0.0001
+        || (left.longitude - right.longitude).abs() > 0.0001
+}
+
 fn location_display_label<'a>(
     location: &'a Location,
     language: Language,
@@ -2221,6 +2260,9 @@ fn location_display_label<'a>(
 }
 
 fn preset_matches_location(preset: &app::Preset, location: &Location) -> bool {
+    if is_iss_preset(preset) || is_iss_location(location) {
+        return is_iss_preset(preset) && is_iss_location(location);
+    }
     (preset.latitude - location.latitude).abs() < 0.0001
         && (preset.longitude - location.longitude).abs() < 0.0001
 }
@@ -6156,6 +6198,26 @@ mod tests {
         assert!(text.contains("Globe legend"));
         assert!(text.contains("preview center"));
         assert!(!text.contains("constellation node"));
+    }
+
+    #[test]
+    fn help_and_footer_do_not_expose_iss_mode_shortcut() {
+        let backend = TestBackend::new(120, 36);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = app_for_test(false);
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(!text.contains("ISS Sky"));
+        assert!(!text.contains("ISS Cupola"));
+        assert!(!text.contains("i ISS"));
+
+        app.help = true;
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let text = buffer_text(&terminal, 120, 36);
+        assert!(!text.contains("ISS view"));
+        assert!(!text.contains("ISS视角"));
     }
 
     #[test]
